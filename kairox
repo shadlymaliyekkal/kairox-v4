@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ╔══════════════════════════════════════════════════════════════════╗
-#   KAIROX v3  —  Cinematic Premium Reconnaissance Platform
+#   KAIROX v4  —  Premium Reconnaissance Platform
 #   Author  : Shadly Maliyekkal
 #   License : Authorized security testing ONLY
 # ╚══════════════════════════════════════════════════════════════════╝
@@ -227,7 +227,7 @@ def animate_banner():
     div = Text()
     for ch in "━"*12: div.append(ch, style=f"bold {TEAL}")
     div.append("  ◈  ", style=f"bold {GOLD}")
-    div.append("KAIROX v3", style=f"bold {C1}")
+    div.append("KAIROX v4", style=f"bold {C1}")
     div.append("  ·  ", style=f"dim {GREY}")
     div.append("PREMIUM RECONNAISSANCE PLATFORM", style=f"bold {C1}")
     div.append("  ◈  ", style=f"bold {GOLD}")
