@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # ╔══════════════════════════════════════════════════════════════════╗
-#   KAIROX v4  —  Premium Reconnaissance Platform
+#   KAIROX v4  —  Professional Reconnaissance & Vulnerability Platform
 #   Author  : Shadly Maliyekkal
+#   Level   : OSCP-Grade Passive Recon + Vuln Detection
 #   License : Authorized security testing ONLY
 # ╚══════════════════════════════════════════════════════════════════╝
 
-import os, sys, time, subprocess, shutil, json, re, random
+import os, sys, time, subprocess, shutil, json, re, random, socket
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     from rich.console import Console
@@ -28,65 +30,44 @@ except ImportError:
     sys.exit(1)
 
 # ══════════════════════════════════════════════════════════════════
-#   THEME & COLOUR CONSTANTS
+#   COLOUR CONSTANTS
 # ══════════════════════════════════════════════════════════════════
-
 THEME = Theme({
-    "kx.c1"  : "color(51)",
-    "kx.c2"  : "color(45)",
-    "kx.purp": "color(135)",
-    "kx.gold": "color(220)",
-    "kx.green":"color(82)",
-    "kx.red" : "color(196)",
-    "kx.orng": "color(214)",
-    "kx.teal": "color(43)",
-    "kx.grey": "color(244)",
-    "kx.dim" : "color(238)",
+    "kx.c1"  : "color(51)",  "kx.c2"  : "color(45)",
+    "kx.purp": "color(135)", "kx.gold": "color(220)",
+    "kx.green":"color(82)",  "kx.red" : "color(196)",
+    "kx.orng": "color(214)", "kx.teal": "color(43)",
+    "kx.grey": "color(244)", "kx.dim" : "color(238)",
     "kx.white":"color(255)",
 })
 console = Console(theme=THEME, highlight=False)
 
-C1   = "color(51)"    # neon cyan — primary brand
-C2   = "color(45)"    # bright cyan
-C3   = "color(39)"
-PURP = "color(135)"   # purple
-PINK = "color(201)"   # hot pink
-GOLD = "color(220)"   # gold
-GREEN= "color(82)"
-RED  = "color(196)"
-ORNG = "color(214)"
-TEAL = "color(43)"
-GREY = "color(244)"
-DIM  = "color(238)"
-WHITE= "color(255)"
+C1=    "color(51)";  C2=    "color(45)";  C3=    "color(39)"
+PURP=  "color(135)"; PINK=  "color(201)"; GOLD=  "color(220)"
+GREEN= "color(82)";  RED=   "color(196)"; ORNG=  "color(214)"
+TEAL=  "color(43)";  GREY=  "color(244)"; DIM=   "color(238)"
+WHITE= "color(255)"; LIME=  "color(118)"; LBLUE= "color(75)"
 
 # ══════════════════════════════════════════════════════════════════
-#   SEVERITY CLASSIFICATION
-#
-#   RULE:
-#     HTTP 200 / 301 / 302  on sensitive path  →  HIGH   (actually reachable)
-#     HTTP 401              on any path         →  MEDIUM (exists, needs creds)
-#     HTTP 403              on any path         →  MEDIUM (firewall blocking — NOT high)
-#     URL/subdomain name-only (no status known) →  name-pattern based
-#     Ports / services                          →  name-pattern based
+#   SEVERITY & CLASSIFICATION ENGINE
 # ══════════════════════════════════════════════════════════════════
 
 HIGH_PATHS = [
-    r"admin",r"login",r"dashboard",r"panel",r"manager",
-    r"api/v\d",r"api/",r"\.env",r"config",r"secret",
-    r"token",r"key",r"passwd",r"password",r"backup",
-    r"\.git",r"\.svn",r"phpmyadmin",r"wp-admin",r"cpanel",
-    r"webmail",r"console",r"swagger",r"graphql",r"actuator",
-    r"\.htaccess",r"\.ssh",r"id_rsa",r"shadow",r"passwd",
+    r"admin",r"login",r"dashboard",r"panel",r"manager",r"api/v\d",r"api/",
+    r"\.env",r"config",r"secret",r"token",r"key\b",r"passwd",r"password",
+    r"backup",r"\.git",r"\.svn",r"phpmyadmin",r"wp-admin",r"cpanel",
+    r"webmail",r"console",r"swagger",r"graphql",r"actuator",r"\.htaccess",
+    r"\.ssh",r"id_rsa",r"shadow",r"database",r"db_",r"credentials",
+    r"jenkins",r"jira",r"confluence",r"gitlab",r"sonar",r"kibana",
+    r"elastic",r"redis",r"mongo",r"memcache",r"rabbitmq",
 ]
 MEDIUM_PATHS = [
-    r"ftp",r"smtp",r"8080",r"8443",r"8888",r"proxy",
-    r"upload",r"download",r"file",r"static",r"assets",
-    r"old",r"bak",r"test",r"dev",r"staging",r"temp",
+    r"ftp",r"smtp",r"8080",r"8443",r"8888",r"proxy",r"upload",r"download",
+    r"file",r"static",r"assets",r"old",r"bak",r"test",r"dev",r"staging",
+    r"temp",r"cache",r"log",r"debug",r"info",r"status",r"health",r"metrics",
 ]
 
 def classify_name(text):
-    """Classify by path/name pattern ONLY — no HTTP status involved."""
     t = text.lower()
     for p in HIGH_PATHS:
         if re.search(p, t): return "HIGH"
@@ -96,51 +77,223 @@ def classify_name(text):
 
 def classify_path_with_status(url, code):
     """
-    Combine path sensitivity with live HTTP status code.
-
-    200 / 301 / 302  →  path is OPEN and reachable  →  honour name-based severity
-    401              →  path EXISTS but needs auth   →  MEDIUM (interesting, not free)
-    403              →  path is FIREWALL BLOCKED     →  MEDIUM (not freely accessible)
-    anything else    →  LOW
-
-    IMPORTANT: 403 is NEVER HIGH — a firewall returning 403 does NOT mean
-    the resource is exposed.  It means the opposite.
+    200/301/302 + sensitive path → HIGH (confirmed accessible)
+    403         any path         → MEDIUM (firewall — NOT exposed)
+    401         any path         → MEDIUM (exists but auth required)
     """
     c = code.strip()
-    if c in ("200", "301", "302"):
-        # Truly accessible — name pattern decides severity
+    if c in ("200","301","302"):
         return classify_name(url)
-    elif c == "401":
-        # Exists but requires credentials
+    elif c in ("401","403"):
         return "MEDIUM"
-    elif c == "403":
-        # Firewall / WAF blocking — path may not even exist
-        return "MEDIUM"
-    else:
-        return "LOW"
+    return "LOW"
 
 def status_tag(code):
-    return {
-        "200": "OPEN",
-        "301": "REDIRECT",
-        "302": "REDIRECT",
-        "401": "AUTH-REQUIRED",
-        "403": "FIREWALL/BLOCKED",
-    }.get(code.strip(), code.strip())
+    return {"200":"OPEN","301":"REDIRECT","302":"REDIRECT",
+            "401":"AUTH-REQUIRED","403":"FIREWALL/BLOCKED"}.get(code.strip(), code.strip())
 
 def sev_col(sev):
-    return {"HIGH": RED, "MEDIUM": ORNG, "LOW": GREEN}.get(sev, GREY)
+    return {"HIGH":RED,"MEDIUM":ORNG,"LOW":GREEN}.get(sev, GREY)
 
 # ══════════════════════════════════════════════════════════════════
-#   TERMINAL HELPERS
+#   WAF FINGERPRINT DATABASE
 # ══════════════════════════════════════════════════════════════════
 
-def _up(n):
-    sys.stdout.write(f"\033[{n}A")
-    sys.stdout.flush()
+WAF_SIGNATURES = {
+    "Cloudflare": {
+        "headers":  ["cf-ray","cf-cache-status","server:cloudflare"],
+        "body":     ["cloudflare","__cfduid","cf-mitigated"],
+        "cookies":  ["__cfduid","cf_clearance"],
+        "weaknesses": [
+            "Origin IP exposure via DNS history (Shodan/Censys/SecurityTrails)",
+            "Bypass via direct IP if origin server is found",
+            "IPv6 addresses sometimes bypass CF filtering",
+            "Subdomain enumeration may reveal unprotected origins",
+            "SSL certificate transparency may leak real IP",
+        ],
+    },
+    "AWS WAF / CloudFront": {
+        "headers":  ["x-amz-cf-id","x-amz-request-id","via:cloudfront","server:amazons3"],
+        "body":     ["aws waf","request blocked by aws"],
+        "cookies":  ["awsalb","awsalbcors"],
+        "weaknesses": [
+            "SSRF via AWS metadata endpoint (169.254.169.254) if app vulnerable",
+            "Misconfigured S3 bucket permissions may expose data directly",
+            "Lambda function URLs may bypass WAF rules",
+            "API Gateway endpoints may have weaker WAF config than CloudFront",
+        ],
+    },
+    "Akamai": {
+        "headers":  ["akamai","x-akamai-transformed","x-check-cacheable","server:akamaighost"],
+        "body":     ["akamai technologies","reference #"],
+        "cookies":  ["ak_bmsc","bm_sz","bm_sv"],
+        "weaknesses": [
+            "Bot Manager JavaScript challenges may be analysable",
+            "Cache poisoning via unkeyed headers",
+            "Origin IP via older DNS records or cert transparency",
+            "Rate limiting thresholds may be mappable",
+        ],
+    },
+    "Imperva / Incapsula": {
+        "headers":  ["x-iinfo","x-cdn:incapsula","incap_ses","visid_incap"],
+        "body":     ["incapsula","request unsuccessful","powered by incapsula"],
+        "cookies":  ["incap_ses","visid_incap"],
+        "weaknesses": [
+            "Bypass via X-Forwarded-For header manipulation in some configs",
+            "Origin IP leakage via MX/SPF records",
+            "Rule bypass via encoding variations (UTF-8, URL encoding)",
+        ],
+    },
+    "Sucuri": {
+        "headers":  ["x-sucuri-id","x-sucuri-cache","server:sucuri"],
+        "body":     ["sucuri website firewall","access denied - sucuri"],
+        "cookies":  [],
+        "weaknesses": [
+            "Origin IP via DNS history tools",
+            "Sucuri uses fixed IP ranges — direct access if origin exposed",
+            "May rely on IP allowlisting which can be bypassed from allowed regions",
+        ],
+    },
+    "F5 BIG-IP ASM": {
+        "headers":  ["x-cnection","x-wa-info","bigip","server:bigip"],
+        "body":     ["the requested url was rejected","ts=","tsvid="],
+        "cookies":  ["ts","tsvid","bigipserver"],
+        "weaknesses": [
+            "CVE-2022-1388 — iControl REST unauthenticated RCE (if unpatched)",
+            "CVE-2021-22986 — iControl REST unauthenticated RCE",
+            "Management interface (port 8443/443) sometimes internet-exposed",
+            "TMUI interface exposure (CVE-2020-5902)",
+        ],
+    },
+    "ModSecurity": {
+        "headers":  ["mod_security","modsecurity","x-content-type-options"],
+        "body":     ["mod_security","not acceptable","406 not acceptable"],
+        "cookies":  [],
+        "weaknesses": [
+            "Rule bypass via parameter pollution (HPP)",
+            "Bypass via chunked encoding in POST bodies",
+            "Comment injection in SQL payloads may evade rules",
+            "JSON/XML content-type may bypass URL-encoded rule sets",
+        ],
+    },
+    "Nginx / Generic": {
+        "headers":  ["server:nginx"],
+        "body":     [],
+        "cookies":  [],
+        "weaknesses": [
+            "May be running without a dedicated WAF — check for unprotected paths",
+            "Nginx alias traversal misconfiguration (location /static/ alias /var/www/)",
+            "Off-by-slash vulnerability in proxy_pass configuration",
+        ],
+    },
+    "Apache": {
+        "headers":  ["server:apache"],
+        "body":     [],
+        "cookies":  [],
+        "weaknesses": [
+            "mod_status exposed at /server-status — information disclosure",
+            "Directory listing if Options +Indexes enabled",
+            ".htaccess file disclosure if misconfigured",
+            "CVE-2021-41773 / CVE-2021-42013 — path traversal (Apache 2.4.49-50)",
+        ],
+    },
+    "Fortinet FortiWeb": {
+        "headers":  ["fortigate","fortiweb","x-forwarded-by:fortigate"],
+        "body":     ["fortigate","fortiweb","your request has been blocked"],
+        "cookies":  ["cookiesession1"],
+        "weaknesses": [
+            "CVE-2022-40684 — authentication bypass on management interface",
+            "Management UI should never be internet-exposed",
+        ],
+    },
+    "Barracuda": {
+        "headers":  ["barracuda","bnmobilesdk"],
+        "body":     ["barracuda networks","barra_counter_session"],
+        "cookies":  ["barra_counter_session"],
+        "weaknesses": [
+            "CVE-2023-2868 — Remote code injection via malformed TAR attachments (ESG appliance)",
+            "Management interface exposure is a critical misconfiguration",
+        ],
+    },
+}
 
-def tw():
-    return console.width or 100
+def fingerprint_waf(headers_str, body_str, cookies_str):
+    """Return list of (waf_name, confidence) matches."""
+    detected = []
+    h = headers_str.lower()
+    b = body_str.lower()
+    c = cookies_str.lower()
+    combined = h + " " + b + " " + c
+
+    for waf, sigs in WAF_SIGNATURES.items():
+        score = 0
+        for sig in sigs["headers"]:
+            if sig.lower() in h: score += 3
+        for sig in sigs["body"]:
+            if sig.lower() in b: score += 2
+        for sig in sigs["cookies"]:
+            if sig.lower() in c: score += 2
+        if score >= 2:
+            conf = "HIGH" if score >= 5 else "MEDIUM" if score >= 3 else "LOW"
+            detected.append((waf, conf, score))
+
+    detected.sort(key=lambda x: x[2], reverse=True)
+    return detected
+
+# ══════════════════════════════════════════════════════════════════
+#   VULNERABILITY PATTERNS  (passive detection)
+# ══════════════════════════════════════════════════════════════════
+
+VULN_PATTERNS = {
+    # --- Headers missing (passive, from response analysis) ---
+    "Missing HSTS Header":              {"sev":"MEDIUM", "tag":"header-missing",  "check":"strict-transport-security"},
+    "Missing X-Frame-Options":          {"sev":"MEDIUM", "tag":"header-missing",  "check":"x-frame-options"},
+    "Missing X-Content-Type-Options":   {"sev":"LOW",    "tag":"header-missing",  "check":"x-content-type-options"},
+    "Missing Content-Security-Policy":  {"sev":"MEDIUM", "tag":"header-missing",  "check":"content-security-policy"},
+    "Missing Referrer-Policy":          {"sev":"LOW",    "tag":"header-missing",  "check":"referrer-policy"},
+    "Missing Permissions-Policy":       {"sev":"LOW",    "tag":"header-missing",  "check":"permissions-policy"},
+    # --- Dangerous headers present ---
+    "Server Version Disclosed":         {"sev":"LOW",    "tag":"info-disclosure", "check":"server:"},
+    "X-Powered-By Disclosed":           {"sev":"LOW",    "tag":"info-disclosure", "check":"x-powered-by:"},
+    "ASP.NET Version Disclosed":        {"sev":"MEDIUM", "tag":"info-disclosure", "check":"x-aspnet-version:"},
+    "PHP Version Disclosed":            {"sev":"MEDIUM", "tag":"info-disclosure", "check":"x-php-version:"},
+}
+
+CVE_SIGNATURES = [
+    # Format: (CVE, severity, pattern_in_banner_or_header, description)
+    ("CVE-2021-44228", "CRITICAL", r"log4j|log4shell",                "Log4Shell — Remote Code Execution via JNDI"),
+    ("CVE-2021-41773", "CRITICAL", r"apache/2\.4\.49",                "Apache 2.4.49 Path Traversal / RCE"),
+    ("CVE-2021-42013", "CRITICAL", r"apache/2\.4\.50",                "Apache 2.4.50 Path Traversal / RCE"),
+    ("CVE-2022-1388",  "CRITICAL", r"big-?ip|bigip|f5",               "F5 BIG-IP iControl REST Auth Bypass"),
+    ("CVE-2022-22965", "CRITICAL", r"spring|springframework",         "Spring4Shell — RCE in Spring Framework"),
+    ("CVE-2023-44487", "HIGH",     r"http/2",                         "HTTP/2 Rapid Reset Attack (DoS)"),
+    ("CVE-2021-26855", "CRITICAL", r"microsoft.+exchange|owa|exchange", "ProxyLogon — Exchange Server SSRF/RCE"),
+    ("CVE-2021-34473", "CRITICAL", r"microsoft.+exchange|owa",        "ProxyShell — Exchange Server RCE"),
+    ("CVE-2019-11510", "CRITICAL", r"pulse.+secure|ivanti",           "Pulse Secure VPN — Arbitrary File Read"),
+    ("CVE-2021-22986", "CRITICAL", r"big-?ip|bigip",                  "F5 BIG-IP iControl REST Unauth RCE"),
+    ("CVE-2022-40684", "CRITICAL", r"fortigate|fortios|fortiproxy",   "FortiOS/FortiProxy Auth Bypass"),
+    ("CVE-2023-23397", "CRITICAL", r"microsoft.+outlook|exchange",    "Outlook NTLM Hash Leakage via Calendar"),
+    ("CVE-2021-3156",  "HIGH",     r"sudo",                           "Baron Samedit — Sudo Heap Overflow"),
+    ("CVE-2022-30190", "HIGH",     r"mshtml|ms-msdt|microsoft",       "Follina — MSDT Remote Code Execution"),
+    ("CVE-2021-44228", "CRITICAL", r"vmware|vcenter",                 "VMware vCenter Log4Shell"),
+    ("CVE-2022-22963", "CRITICAL", r"spring.+cloud|spring.+function", "Spring Cloud Function SPEL RCE"),
+    ("CVE-2023-34362", "CRITICAL", r"moveit|progress",                "MOVEit Transfer SQL Injection / RCE"),
+    ("CVE-2024-3400",  "CRITICAL", r"palo.?alto|pan-?os|globalprotect","PAN-OS Command Injection"),
+    ("CVE-2023-4966",  "CRITICAL", r"citrix|netscaler",               "Citrix Bleed — Session Token Leak"),
+    ("CVE-2024-21887","CRITICAL",  r"ivanti|pulse",                   "Ivanti Command Injection"),
+]
+
+SSL_VULNS = [
+    ("SSLv2/v3 Supported",   "HIGH",   "sslv2|sslv3",     "Deprecated SSL versions — DROWN/POODLE attack surface"),
+    ("TLSv1.0 Supported",    "MEDIUM", "tlsv1\\.0|tls 1", "TLSv1.0 deprecated — BEAST/POODLE risk"),
+    ("TLSv1.1 Supported",    "MEDIUM", "tlsv1\\.1",       "TLSv1.1 deprecated"),
+    ("Weak Cipher (RC4)",     "HIGH",   r"\brc4\b",        "RC4 stream cipher — cryptographically broken"),
+    ("Weak Cipher (3DES)",    "MEDIUM", r"3des|des-cbc3",  "3DES — Sweet32 birthday attack"),
+    ("EXPORT Cipher",         "HIGH",   r"export",         "EXPORT grade cipher — FREAK/LOGJAM attack surface"),
+    ("Heartbleed Risk",       "HIGH",   r"openssl/1\.[0-1]\.[0-1][^a-z]","OpenSSL 1.0.x — check for Heartbleed (CVE-2014-0160)"),
+    ("Self-Signed Cert",      "MEDIUM", r"self.signed|unable to verify", "Self-signed certificate — MITM risk"),
+    ("Certificate Expired",   "HIGH",   r"expired|certificate has expired","Expired TLS certificate"),
+]
 
 # ══════════════════════════════════════════════════════════════════
 #   BANNER + ANIMATIONS
@@ -165,80 +318,66 @@ def _frame(lines):
 def animate_banner():
     os.system("clear 2>/dev/null || cls 2>/dev/null")
     n = len(BANNER)
-
-    # Phase 1 — matrix rain reveal
     for fr in range(28):
         prog = fr / 27
         flines = []
         for i, line in enumerate(BANNER):
-            lr = min(1.0, max(0.0, prog * 1.6 - i * 0.1))
+            lr = min(1.0, max(0.0, prog*1.6 - i*0.1))
             chars = []
             for j, ch in enumerate(line):
-                cr = j / max(len(line)-1, 1)
-                if   lr > cr + 0.05: chars.append(ch)
-                elif lr > cr:        chars.append(random.choice(GCHARS))
-                else:                chars.append(random.choice(MCHARS) if random.random() < lr*0.7 else " ")
+                cr = j / max(len(line)-1,1)
+                if   lr > cr+0.05: chars.append(ch)
+                elif lr > cr:      chars.append(random.choice(GCHARS))
+                else:              chars.append(random.choice(MCHARS) if random.random()<lr*0.7 else " ")
             flines.append(Text("".join(chars), style=LGRAD[i]))
-        console.print()
-        _frame(flines)
-        time.sleep(0.03)
-        _up(n + 1)
+        console.print(); _frame(flines); time.sleep(0.03)
+        sys.stdout.write(f"\033[{n+1}A"); sys.stdout.flush()
 
-    # Phase 2 — glitch flashes
-    GCOLS = ["color(201)","color(51)","color(226)","color(196)","color(135)"]
+    GCOLS=["color(201)","color(51)","color(226)","color(196)","color(135)"]
     for g in range(6):
         flines = []
         for i, line in enumerate(BANNER):
-            if g < 4 and random.random() < 0.45:
-                col = random.choice(GCOLS)
-                gl  = "".join(random.choice(GCHARS) if random.random()<0.20 else c for c in line)
+            if g<4 and random.random()<0.45:
+                col=random.choice(GCOLS)
+                gl="".join(random.choice(GCHARS) if random.random()<0.20 else c for c in line)
                 flines.append(Text(gl, style=f"bold {col}"))
             else:
                 flines.append(Text(line, style=f"bold {LGRAD[i]}"))
-        console.print()
-        _frame(flines)
-        time.sleep(0.055)
-        _up(n + 1)
+        console.print(); _frame(flines); time.sleep(0.055)
+        sys.stdout.write(f"\033[{n+1}A"); sys.stdout.flush()
 
-    # Phase 3 — colour sweep left→right
     for fr in range(20):
-        sp = fr / 19
-        flines = []
+        sp=fr/19; flines=[]
         for i, line in enumerate(BANNER):
-            t = Text()
-            for j, ch in enumerate(line):
-                d = abs(j / max(len(line)-1, 1) - sp)
-                if   d < 0.08: t.append(ch, style="bold color(255)")
-                elif d < 0.18: t.append(ch, style=f"bold {C1}")
-                elif d < 0.30: t.append(ch, style=f"bold {C2}")
-                else:          t.append(ch, style=f"bold {LGRAD[i]}")
+            t=Text()
+            for j,ch in enumerate(line):
+                d=abs(j/max(len(line)-1,1)-sp)
+                if   d<0.08: t.append(ch,style="bold color(255)")
+                elif d<0.18: t.append(ch,style=f"bold {C1}")
+                elif d<0.30: t.append(ch,style=f"bold {C2}")
+                else:        t.append(ch,style=f"bold {LGRAD[i]}")
             flines.append(t)
-        console.print()
-        _frame(flines)
-        time.sleep(0.04)
-        _up(n + 1)
+        console.print(); _frame(flines); time.sleep(0.04)
+        sys.stdout.write(f"\033[{n+1}A"); sys.stdout.flush()
 
-    # Phase 4 — final stable render
     console.print()
-    for i, line in enumerate(BANNER):
+    for i,line in enumerate(BANNER):
         console.print(Align.center(Text(line, style=f"bold {LGRAD[i]}")))
-
     console.print()
-    div = Text()
-    for ch in "━"*12: div.append(ch, style=f"bold {TEAL}")
-    div.append("  ◈  ", style=f"bold {GOLD}")
-    div.append("KAIROX v4", style=f"bold {C1}")
-    div.append("  ·  ", style=f"dim {GREY}")
-    div.append("PREMIUM RECONNAISSANCE PLATFORM", style=f"bold {C1}")
-    div.append("  ◈  ", style=f"bold {GOLD}")
-    for ch in "━"*12: div.append(ch, style=f"bold {TEAL}")
+    div=Text()
+    for ch in "━"*10: div.append(ch,style=f"bold {TEAL}")
+    div.append("  ◈  ",style=f"bold {GOLD}")
+    div.append("KAIROX v4",style=f"bold {C1}")
+    div.append("  ·  ",style=f"dim {GREY}")
+    div.append("OSCP-GRADE RECON & VULN PLATFORM",style=f"bold {C1}")
+    div.append("  ◈  ",style=f"bold {GOLD}")
+    for ch in "━"*10: div.append(ch,style=f"bold {TEAL}")
     console.print(Align.center(div))
-
-    auth = Text()
-    auth.append("  crafted by ", style=f"dim {GREY}")
-    auth.append("Shadly Maliyekkal", style=f"bold {PURP}")
-    auth.append("  ·  ", style=f"dim {GREY}")
-    auth.append("Passive & Active OSINT Engine", style=f"italic {C2}")
+    auth=Text()
+    auth.append("  crafted by ",style=f"dim {GREY}")
+    auth.append("Shadly Maliyekkal",style=f"bold {PURP}")
+    auth.append("  ·  ",style=f"dim {GREY}")
+    auth.append("Recon · WAF Detection · Vuln Identification",style=f"italic {C2}")
     console.print(Align.center(auth))
     console.print()
 
@@ -247,420 +386,669 @@ def animate_banner():
 # ══════════════════════════════════════════════════════════════════
 
 def boot_sequence():
-    checks = [
-        ("Initializing recon engine",        0.18),
-        ("Loading signature database",       0.14),
-        ("Spawning async worker pool",       0.12),
-        ("Connecting passive OSINT feed",    0.16),
-        ("Calibrating packet timing engine", 0.13),
-        ("Engaging stealth subsystem",       0.11),
-        ("Mounting encrypted output store",  0.10),
-        ("System ready",                     0.20),
+    checks=[
+        ("Initializing recon engine",           0.16),
+        ("Loading CVE signature database",      0.14),
+        ("Loading WAF fingerprint database",    0.13),
+        ("Spawning async worker pool",          0.12),
+        ("Connecting passive OSINT feed",       0.15),
+        ("Calibrating SSL/TLS analyser",        0.11),
+        ("Loading vuln detection patterns",     0.12),
+        ("Mounting stealth subsystem",          0.10),
+        ("System ready — OSCP mode engaged",    0.20),
     ]
-    BW = 32
-    console.print(f"  [bold {TEAL}]{chr(9472)*(BW+42)}[/]")
-    for label, delay in checks:
-        for pct in range(0, 101, random.randint(4,12)):
-            pct = min(100, pct)
-            f   = int(BW * pct / 100)
-            col = GREEN if pct==100 else C1
-            bt  = Text()
-            bt.append("  [", style=f"dim {GREY}")
-            bt.append("█"*f,     style=f"bold {col}")
-            bt.append("░"*(BW-f),style=f"dim {DIM}")
-            bt.append("]", style=f"dim {GREY}")
-            bt.append(f"  {pct:>3}%  ", style=f"bold {col}")
-            bt.append(label, style=f"bold {WHITE}" if pct<100 else f"bold {GREEN}")
-            if pct==100: bt.append("  ✔", style=f"bold {GREEN}")
-            sys.stdout.write("\r\033[2K")
-            console.print(bt, end="")
-            sys.stdout.flush()
-            if pct < 100: time.sleep(delay * random.uniform(0.05,0.18))
-        time.sleep(0.05)
-        sys.stdout.write("\r\033[2K")
-        sys.stdout.flush()
-    ok_t = Text()
-    ok_t.append("  [", style=f"dim {GREY}")
-    ok_t.append("█"*BW, style=f"bold {GREEN}")
-    ok_t.append("]", style=f"dim {GREY}")
-    ok_t.append("  100%  ALL SYSTEMS OPERATIONAL  ✔", style=f"bold {GREEN}")
+    BW=32
+    console.print(f"  [bold {TEAL}]{chr(9472)*(BW+48)}[/]")
+    for label,delay in checks:
+        for pct in range(0,101,random.randint(4,12)):
+            pct=min(100,pct); f=int(BW*pct/100); col=GREEN if pct==100 else C1
+            bt=Text()
+            bt.append("  [",style=f"dim {GREY}"); bt.append("█"*f,style=f"bold {col}")
+            bt.append("░"*(BW-f),style=f"dim {DIM}"); bt.append("]",style=f"dim {GREY}")
+            bt.append(f"  {pct:>3}%  ",style=f"bold {col}")
+            bt.append(label,style=f"bold {WHITE}" if pct<100 else f"bold {GREEN}")
+            if pct==100: bt.append("  ✔",style=f"bold {GREEN}")
+            sys.stdout.write("\r\033[2K"); console.print(bt,end=""); sys.stdout.flush()
+            if pct<100: time.sleep(delay*random.uniform(0.05,0.18))
+        time.sleep(0.04); sys.stdout.write("\r\033[2K"); sys.stdout.flush()
+    ok_t=Text()
+    ok_t.append("  [",style=f"dim {GREY}"); ok_t.append("█"*BW,style=f"bold {GREEN}")
+    ok_t.append("]",style=f"dim {GREY}")
+    ok_t.append("  100%  ALL SYSTEMS OPERATIONAL  ✔",style=f"bold {GREEN}")
     console.print(ok_t)
-    console.print(f"  [bold {TEAL}]{chr(9472)*(BW+42)}[/]")
-    console.print()
-    time.sleep(0.3)
+    console.print(f"  [bold {TEAL}]{chr(9472)*(BW+48)}[/]")
+    console.print(); time.sleep(0.3)
 
 # ══════════════════════════════════════════════════════════════════
 #   LEGAL DISCLAIMER
 # ══════════════════════════════════════════════════════════════════
 
 def show_disclaimer():
-    t = Text()
-    t.append("  ⚠  LEGAL DISCLAIMER & TERMS OF USE\n\n", style=f"bold {GOLD}")
-    t.append("  This tool is intended ", style=WHITE)
-    t.append("EXCLUSIVELY", style=f"bold {C1}")
-    t.append(" for:\n", style=WHITE)
-    for col, sym, msg in [
+    t=Text()
+    t.append("  ⚠  LEGAL DISCLAIMER & TERMS OF USE\n\n",style=f"bold {GOLD}")
+    t.append("  This tool is intended ",style=WHITE); t.append("EXCLUSIVELY",style=f"bold {C1}")
+    t.append(" for:\n",style=WHITE)
+    for col,sym,msg in [
         (GREEN,"✔","Authorized penetration testing engagements"),
         (GREEN,"✔","Security research on systems you own or have permission to test"),
         (GREEN,"✔","Bug bounty programmes with explicit written authorization"),
+        (GREEN,"✔","OSCP / certification lab environments"),
     ]:
-        t.append("    "); t.append(sym, style=f"bold {col}")
-        t.append(f"  {msg}\n", style=WHITE)
-    t.append("\n  This tool must ", style=WHITE)
-    t.append("NOT", style=f"bold {RED}")
-    t.append(" be used against:\n", style=WHITE)
-    for col, sym, msg in [
+        t.append("    "); t.append(sym,style=f"bold {col}"); t.append(f"  {msg}\n",style=WHITE)
+    t.append("\n  This tool must ",style=WHITE); t.append("NOT",style=f"bold {RED}")
+    t.append(" be used against:\n",style=WHITE)
+    for col,sym,msg in [
         (RED,"✘","Government or military infrastructure"),
-        (RED,"✘","Critical national infrastructure (energy, water, finance)"),
+        (RED,"✘","Critical national infrastructure"),
         (RED,"✘","Any target without explicit written authorization"),
-        (RED,"✘","Systems outside your agreed scope of engagement"),
+        (RED,"✘","Systems outside your agreed scope"),
     ]:
-        t.append("    "); t.append(sym, style=f"bold {col}")
-        t.append(f"  {msg}\n", style=WHITE)
-    t.append("\n  The author accepts ", style=f"dim {GREY}")
-    t.append("ZERO LIABILITY", style=f"bold {RED}")
-    t.append(" for misuse or unauthorized use.  You assume full legal responsibility.", style=f"dim {GREY}")
-    console.print(Panel(t, title=f"[bold {RED}]  ⚖  LEGAL DISCLAIMER  ⚖  [/]",
-                        border_style=RED, box=box.DOUBLE_EDGE, padding=(1,2), expand=False))
+        t.append("    "); t.append(sym,style=f"bold {col}"); t.append(f"  {msg}\n",style=WHITE)
+    t.append("\n  The author accepts ",style=f"dim {GREY}")
+    t.append("ZERO LIABILITY",style=f"bold {RED}")
+    t.append(" for misuse.  You assume full legal responsibility.",style=f"dim {GREY}")
+    console.print(Panel(t,title=f"[bold {RED}]  ⚖  LEGAL DISCLAIMER  ⚖  [/]",
+                        border_style=RED,box=box.DOUBLE_EDGE,padding=(1,2),expand=False))
     console.print()
 
 def require_consent():
-    console.print(f"  [bold {GOLD}]◈[/]  [bold {WHITE}]Do you accept these terms and confirm you have authorization?[/]")
-    answer = Prompt.ask(
-        f"  [bold {C1}]  Type[/] [bold {GREEN}]YES[/] [bold {C1}]to continue or[/] [bold {RED}]NO[/] [bold {C1}]to exit[/]"
-    )
-    if answer.strip().upper() != "YES":
-        console.print()
-        console.print(Panel(f"  [bold {RED}]Session terminated.  Goodbye.[/]",
-                            border_style=RED, box=box.DOUBLE_EDGE, expand=False))
-        console.print()
-        sys.exit(0)
+    console.print(f"  [bold {GOLD}]◈[/]  [bold {WHITE}]Do you have written authorization to test this target?[/]")
+    answer=Prompt.ask(f"  [bold {C1}]  Type[/] [bold {GREEN}]YES[/] [bold {C1}]to continue or[/] [bold {RED}]NO[/] [bold {C1}]to exit[/]")
+    if answer.strip().upper()!="YES":
+        console.print(); console.print(Panel(f"  [bold {RED}]Session terminated.  Goodbye.[/]",
+                            border_style=RED,box=box.DOUBLE_EDGE,expand=False)); console.print(); sys.exit(0)
     console.print()
 
 # ══════════════════════════════════════════════════════════════════
-#   TOOL STATUS
+#   TOOL STATUS CHECK
 # ══════════════════════════════════════════════════════════════════
 
 def tool_ok(name):
     return shutil.which(name) is not None
 
 def check_tools():
-    tools = [
-        ("subfinder",   "Passive subdomain enumeration"),
-        ("amass",       "OSINT subdomain enumeration"),
-        ("httpx",       "Live host probing"),
-        ("gau",         "URL harvesting from archives"),
-        ("waybackurls", "Wayback Machine URL extraction"),
-        ("nmap",        "Port & service scanning"),
-        ("curl",        "HTTP requests / path probing"),
+    tools=[
+        ("subfinder",   "Passive subdomain enum"),
+        ("amass",       "OSINT subdomain enum"),
+        ("httpx",       "Live host probe + tech detect"),
+        ("gau",         "URL harvesting"),
+        ("waybackurls", "Wayback Machine URLs"),
+        ("nmap",        "Port & service scan"),
+        ("nuclei",      "Vulnerability template scanner"),
+        ("nikto",       "Web vulnerability scanner"),
+        ("whatweb",     "Technology fingerprinting"),
+        ("wapiti",      "Web app vulnerability scanner"),
+        ("sslscan",     "SSL/TLS analysis"),
+        ("testssl.sh",  "Deep SSL/TLS audit"),
+        ("dnsrecon",    "DNS reconnaissance"),
+        ("dnsx",        "Fast DNS resolver"),
+        ("wafw00f",     "WAF fingerprinting"),
+        ("ffuf",        "Directory fuzzer"),
+        ("curl",        "HTTP requests / fallback"),
     ]
-    tbl = Table(box=box.SIMPLE_HEAD, header_style=f"bold {C1}",
-                border_style=TEAL, show_header=True, padding=(0,2), expand=False)
-    tbl.add_column("  TOOL",  style=f"bold {C2}",  no_wrap=True, min_width=14)
+    tbl=Table(box=box.SIMPLE_HEAD,header_style=f"bold {C1}",
+              border_style=TEAL,show_header=True,padding=(0,2),expand=False)
+    tbl.add_column("  TOOL",  style=f"bold {C2}",  no_wrap=True,min_width=14)
     tbl.add_column("PURPOSE", style=f"dim {WHITE}")
     tbl.add_column("STATUS",  no_wrap=True)
-    for name, purpose in tools:
-        st = Text("  ✔  INSTALLED  ", style=f"bold {GREEN}") if tool_ok(name) \
-             else Text("  ✘  MISSING    ", style=f"dim {RED}")
-        tbl.add_row(f"  {name}", purpose, st)
-    console.print(Panel(tbl, title=f"[bold {C1}]  ◈  TOOL STATUS  ◈  [/]",
-                        border_style=C1, box=box.DOUBLE_EDGE, expand=False))
+    for name,purpose in tools:
+        st=Text("  ✔  INSTALLED  ",style=f"bold {GREEN}") if tool_ok(name) \
+           else Text("  ✘  MISSING    ",style=f"dim {RED}")
+        tbl.add_row(f"  {name}",purpose,st)
+    console.print(Panel(tbl,title=f"[bold {C1}]  ◈  TOOL STATUS  ◈  [/]",
+                        border_style=C1,box=box.DOUBLE_EDGE,expand=False))
     console.print()
 
 # ══════════════════════════════════════════════════════════════════
-#   SCAN INIT ANIMATION
+#   UI HELPERS
 # ══════════════════════════════════════════════════════════════════
+
+def tw():
+    return console.width or 100
+
+def section_header(title,color=C1):
+    console.print()
+    w=tw(); pad=max(0,(w-len(title)-6)//2)
+    left=chr(9473)*pad; rgt=chr(9473)*(w-pad-len(title)-6)
+    full=left+f"  {title}  "+rgt
+    for i in range(0,len(full)+1,4):
+        sys.stdout.write(f"\r\033[2K  {full[:i]}"); sys.stdout.flush(); time.sleep(0.003)
+    sys.stdout.write("\r\033[2K")
+    line=Text(); line.append(left,style=f"bold {TEAL}")
+    line.append(f"  {title}  ",style=f"bold {color}"); line.append(rgt,style=f"bold {TEAL}")
+    console.print("  ",end=""); console.print(line); console.print()
 
 def scanning_init_anim(target):
     for msg in [
         f"[bold {TEAL}]◈[/]  Target locked  [bold {C1}]{target}[/]",
-        f"[bold {TEAL}]◈[/]  Resolving DNS chains ...",
+        f"[bold {TEAL}]◈[/]  Resolving DNS + ASN info ...",
         f"[bold {TEAL}]◈[/]  Probing attack surface ...",
-        f"[bold {TEAL}]◈[/]  Spinning up recon modules ...",
-        f"[bold {TEAL}]◈[/]  [bold {GREEN}]Recon engines online.  Launching ...[/]",
+        f"[bold {TEAL}]◈[/]  Engaging vulnerability modules ...",
+        f"[bold {TEAL}]◈[/]  Loading WAF fingerprint engine ...",
+        f"[bold {TEAL}]◈[/]  [bold {GREEN}]All engines online.  Launching ...[/]",
     ]:
-        console.print(f"  {msg}")
-        time.sleep(0.22)
+        console.print(f"  {msg}"); time.sleep(0.20)
     console.print()
-
-# ══════════════════════════════════════════════════════════════════
-#   SECTION HEADER  (animated draw)
-# ══════════════════════════════════════════════════════════════════
-
-def section_header(title, color=C1):
-    console.print()
-    w    = tw()
-    pad  = max(0, (w - len(title) - 6) // 2)
-    left = chr(9473) * pad
-    rgt  = chr(9473) * (w - pad - len(title) - 6)
-    full = left + f"  {title}  " + rgt
-    for i in range(0, len(full)+1, 4):
-        sys.stdout.write(f"\r\033[2K  {full[:i]}")
-        sys.stdout.flush()
-        time.sleep(0.003)
-    sys.stdout.write("\r\033[2K")
-    line = Text()
-    line.append(left,           style=f"bold {TEAL}")
-    line.append(f"  {title}  ", style=f"bold {color}")
-    line.append(rgt,            style=f"bold {TEAL}")
-    console.print("  ", end="")
-    console.print(line)
-    console.print()
-
-# ══════════════════════════════════════════════════════════════════
-#   SCAN COMPLETE ANIMATION
-# ══════════════════════════════════════════════════════════════════
 
 def finish_animation():
     console.print()
-    frames = [
-        ("▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱", 10, "Compiling results ..."),
-        ("███▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱", 25, "Running risk analysis ..."),
-        ("██████▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱", 40, "Classifying by HTTP status ..."),
-        ("█████████▱▱▱▱▱▱▱▱▱▱▱▱", 55, "Separating 403 from 200 findings ..."),
-        ("████████████▱▱▱▱▱▱▱▱▱", 68, "Generating report ..."),
-        ("███████████████▱▱▱▱▱▱", 80, "Writing JSON dump ..."),
-        ("██████████████████▱▱▱", 92, "Cleaning traces ..."),
-        ("█████████████████████", 100,"SCAN COMPLETE"),
+    frames=[
+        ("▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱",10,"Compiling recon data ..."),
+        ("███▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱",25,"Running CVE correlation ..."),
+        ("██████▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱",40,"Classifying vulnerabilities ..."),
+        ("█████████▱▱▱▱▱▱▱▱▱▱▱▱",55,"Fingerprinting WAF/firewall ..."),
+        ("████████████▱▱▱▱▱▱▱▱▱",68,"Generating risk report ..."),
+        ("███████████████▱▱▱▱▱▱",80,"Writing JSON dump ..."),
+        ("██████████████████▱▱▱",92,"Cleaning traces ..."),
+        ("█████████████████████",100,"SCAN COMPLETE"),
     ]
-    for i, (bar, pct, label) in enumerate(frames):
-        col = GREEN if i==len(frames)-1 else C1
-        bt = Text()
-        bt.append("  [", style=f"dim {GREY}")
-        bt.append(bar, style=f"bold {col}")
-        bt.append(f"]  {pct:>3}%  ", style=f"dim {GREY}")
-        bt.append(label, style=f"bold {col}")
-        sys.stdout.write("\r\033[2K")
-        console.print(bt, end="")
-        sys.stdout.flush()
-        time.sleep(0.14)
-    console.print()
-    console.print()
+    for i,(bar,pct,label) in enumerate(frames):
+        col=GREEN if i==len(frames)-1 else C1
+        bt=Text(); bt.append("  [",style=f"dim {GREY}"); bt.append(bar,style=f"bold {col}")
+        bt.append(f"]  {pct:>3}%  ",style=f"dim {GREY}"); bt.append(label,style=f"bold {col}")
+        sys.stdout.write("\r\033[2K"); console.print(bt,end=""); sys.stdout.flush(); time.sleep(0.14)
+    console.print(); console.print()
 
 # ══════════════════════════════════════════════════════════════════
 #   SUBPROCESS HELPER
 # ══════════════════════════════════════════════════════════════════
 
-def run_cmd(cmd, timeout=300):
+def run_cmd(cmd,timeout=300):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return True, (r.stdout or "").strip()
-    except subprocess.TimeoutExpired:
-        return False, f"[timeout {timeout}s]"
-    except FileNotFoundError:
-        return False, f"[not found: {cmd[0]}]"
-    except Exception as e:
-        return False, f"[error: {e}]"
+        r=subprocess.run(cmd,capture_output=True,text=True,timeout=timeout)
+        return True,(r.stdout or "").strip()
+    except subprocess.TimeoutExpired: return False,f"[timeout {timeout}s]"
+    except FileNotFoundError:         return False,f"[not found: {cmd[0]}]"
+    except Exception as e:            return False,f"[error: {e}]"
 
 def lns(raw):
     return [l.strip() for l in raw.splitlines() if l.strip()]
+
+def curl_get(url,extra_args=None,timeout=10):
+    """Fetch URL with curl, return (headers_str, body_str, status_code)."""
+    cmd=["curl","-s","-L","--max-time",str(timeout),"--connect-timeout","5",
+         "-D","-","--insecure","-A","Mozilla/5.0 (compatible; SecurityScanner/1.0)"]
+    if extra_args: cmd+=extra_args
+    cmd+=[url]
+    ok,out=run_cmd(cmd,timeout+5)
+    if not ok: return "","","000"
+    parts=out.split("\r\n\r\n",1) if "\r\n\r\n" in out else out.split("\n\n",1)
+    headers=parts[0] if parts else ""
+    body=parts[1][:4000] if len(parts)>1 else ""
+    m=re.search(r"HTTP/\S+\s+(\d{3})",headers)
+    code=m.group(1) if m else "200"
+    return headers, body, code
 
 # ══════════════════════════════════════════════════════════════════
 #   RECON ENGINE
 # ══════════════════════════════════════════════════════════════════
 
 class KairoxRecon:
-    def __init__(self, target):
+    def __init__(self,target):
         self.target   = target.strip().lower().removeprefix("http://").removeprefix("https://").rstrip("/")
-        self.results  = {"subdomains":[], "live_hosts":[], "urls":[], "ports":[], "dirs":[]}
-        self.findings = {"HIGH":[], "MEDIUM":[], "LOW":[]}
+        self.results  = {
+            "subdomains":[],"live_hosts":[],"urls":[],"ports":[],
+            "dirs":[],"waf":[],"vulns":[],"ssl":[],"dns":[],"tech":[],
+            "emails":[],"asn":[],
+        }
+        self.findings = {"CRITICAL":[],"HIGH":[],"MEDIUM":[],"LOW":[]}
         self.start_ts = datetime.now()
 
-    def _add(self, sev, ftype, value):
-        sev = sev if sev in self.findings else "LOW"
-        self.findings[sev].append((ftype, value))
+    def _add(self,sev,ftype,value):
+        sev=sev if sev in self.findings else "LOW"
+        self.findings[sev].append((ftype,value))
 
-    # ── 1. Subdomains ────────────────────────────────────────────
-    def run_subdomains(self, prog):
-        subs = set()
+    # ── 1. Subdomain enumeration ─────────────────────────────────
+    def run_subdomains(self,prog):
+        subs=set()
         if tool_ok("subfinder"):
             prog.log(f"  [bold {C2}]subfinder[/] → passive subdomain scan ...")
-            ok, out = run_cmd(["subfinder","-d",self.target,"-all","-recursive","-silent"], 180)
+            ok,out=run_cmd(["subfinder","-d",self.target,"-all","-recursive","-silent"],180)
             if ok:
                 for s in lns(out): subs.add(s.lower())
         if tool_ok("amass"):
             prog.log(f"  [bold {C2}]amass[/] → OSINT enumeration ...")
-            ok, out = run_cmd(["amass","enum","-passive","-d",self.target], 240)
+            ok,out=run_cmd(["amass","enum","-passive","-d",self.target],240)
             if ok:
                 for s in lns(out): subs.add(s.lower())
+        if tool_ok("dnsx"):
+            if subs:
+                prog.log(f"  [bold {C2}]dnsx[/] → resolving subdomains ...")
+                inp="\n".join(subs)
+                try:
+                    r=subprocess.run(["dnsx","-silent","-resp"],input=inp,
+                                     capture_output=True,text=True,timeout=60)
+                    for l in lns(r.stdout): subs.add(l.split()[0].lower())
+                except: pass
+        if tool_ok("dnsrecon"):
+            prog.log(f"  [bold {C2}]dnsrecon[/] → DNS enumeration ...")
+            ok,out=run_cmd(["dnsrecon","-d",self.target,"-t","std,brt","-D",
+                            "/usr/share/wordlists/dnsmap.txt","--xml","/tmp/kx_dns.xml"],90)
+            if ok:
+                for m in re.finditer(r"[\w.-]+\."+re.escape(self.target), out):
+                    subs.add(m.group(0).lower())
         if not tool_ok("subfinder") and not tool_ok("amass"):
             prog.log(f"  [bold {ORNG}]fallback[/] → DNS wordlist probe ...")
-            import socket
-            wl = ["www","mail","ftp","dev","staging","api","app","test","admin","vpn",
-                  "remote","beta","portal","shop","blog","m","mobile","ns1","ns2",
-                  "smtp","webmail","cdn","static","assets","media","img","data"]
+            wl=["www","mail","ftp","dev","staging","api","app","test","admin","vpn",
+                "remote","beta","portal","shop","blog","m","mobile","ns1","ns2",
+                "smtp","webmail","cdn","static","assets","media","img","data",
+                "auth","login","secure","cloud","office","store","help","support"]
             for w in wl:
-                h = f"{w}.{self.target}"
-                try:
-                    socket.gethostbyname(h)
-                    subs.add(h)
+                h=f"{w}.{self.target}"
+                try: socket.gethostbyname(h); subs.add(h)
                 except: pass
-        self.results["subdomains"] = sorted(subs)
+        self.results["subdomains"]=sorted(subs)
         for s in self.results["subdomains"]:
-            self._add(classify_name(s), "subdomain", s)
+            self._add(classify_name(s),"subdomain",s)
 
-    # ── 2. Live hosts ────────────────────────────────────────────
-    def run_live_hosts(self, prog):
-        hosts = []
-        inputs = self.results["subdomains"] or [self.target]
+    # ── 2. DNS records (MX, TXT, NS, A) ─────────────────────────
+    def run_dns(self,prog):
+        prog.log(f"  [bold {C2}]dns-recon[/] → extracting DNS records ...")
+        records=[]
+        for rtype in ["A","AAAA","MX","TXT","NS","CNAME","SOA"]:
+            ok,out=run_cmd(["dig","+short",rtype,self.target],15)
+            if ok and out:
+                for l in lns(out):
+                    entry=f"{rtype}  {l}"
+                    records.append(entry)
+                    # SPF / DMARC / DKIM from TXT
+                    if rtype=="TXT":
+                        if "v=spf1" in l.lower(): self._add("LOW","spf-record",l)
+                        if "v=dmarc1" in l.lower(): self._add("LOW","dmarc-record",l)
+                    if rtype=="MX": self._add("LOW","mx-record",l)
+        # Try AXFR (zone transfer — informational, usually blocked)
+        ok,out=run_cmd(["dig","AXFR",self.target,f"@ns1.{self.target}"],10)
+        if ok and "Transfer failed" not in out and len(out)>50:
+            self._add("HIGH","zone-transfer-possible",f"AXFR succeeded on {self.target}")
+            records.append(f"ZONE-TRANSFER  POSSIBLE — {self.target}")
+        self.results["dns"]=records
+
+    # ── 3. ASN / IP info ─────────────────────────────────────────
+    def run_asn(self,prog):
+        prog.log(f"  [bold {C2}]asn-lookup[/] → resolving IP / ASN ...")
+        try:
+            ip=socket.gethostbyname(self.target)
+            self.results["asn"].append(f"IP: {ip}")
+            ok,out=run_cmd(["whois",ip],20)
+            if ok:
+                for kw in ["OrgName","org-name","netname","country","CIDR","route","descr"]:
+                    for l in lns(out):
+                        if l.lower().startswith(kw.lower()+":"):
+                            self.results["asn"].append(l.strip())
+        except: pass
+
+    # ── 4. Live host probing ─────────────────────────────────────
+    def run_live_hosts(self,prog):
+        hosts=[]; inputs=self.results["subdomains"] or [self.target]
         if tool_ok("httpx"):
             prog.log(f"  [bold {C2}]httpx[/] → probing live hosts ...")
             try:
-                r = subprocess.run(
+                r=subprocess.run(
                     ["httpx","-silent","-status-code","-title","-tech-detect","-server","-no-color"],
-                    input="\n".join(inputs), capture_output=True, text=True, timeout=180)
+                    input="\n".join(inputs),capture_output=True,text=True,timeout=180)
                 for line in lns(r.stdout):
                     hosts.append(line)
-                    m = re.search(r"\[(\d{3})\]", line)
-                    code = m.group(1) if m else "200"
-                    self._add(classify_path_with_status(line, code), "live_host", line)
-            except Exception as e:
-                prog.log(f"  [bold {RED}]httpx error:[/] {e}")
+                    m=re.search(r"\[(\d{3})\]",line); code=m.group(1) if m else "200"
+                    self._add(classify_path_with_status(line,code),"live_host",line)
+            except Exception as e: prog.log(f"  [bold {RED}]httpx error:[/] {e}")
         else:
             prog.log(f"  [bold {ORNG}]fallback[/] → curl HTTP probe ...")
             for h in inputs[:20]:
                 for scheme in ("https","http"):
-                    url = f"{scheme}://{h}"
-                    ok, code = run_cmd(
-                        ["curl","-s","-o","/dev/null","-w","%{http_code}",
-                         "-L","--max-time","5","--connect-timeout","3",url], 10)
+                    url=f"{scheme}://{h}"
+                    ok,code=run_cmd(["curl","-s","-o","/dev/null","-w","%{http_code}",
+                                     "-L","--max-time","5","--connect-timeout","3",url],10)
                     if ok and code.strip() in ("200","301","302","403","401"):
-                        e = f"{url}  [{code.strip()}  {status_tag(code.strip())}]"
-                        hosts.append(e)
-                        self._add(classify_path_with_status(url, code), "live_host", e)
-                        break
-        self.results["live_hosts"] = hosts
+                        e=f"{url}  [{code.strip()}  {status_tag(code.strip())}]"
+                        hosts.append(e); self._add(classify_path_with_status(url,code),"live_host",e); break
+        self.results["live_hosts"]=hosts
 
-    # ── 3. URLs ──────────────────────────────────────────────────
-    def run_urls(self, prog):
-        urls = set()
+    # ── 5. Technology fingerprinting ─────────────────────────────
+    def run_tech(self,prog):
+        prog.log(f"  [bold {C2}]tech-detect[/] → fingerprinting technologies ...")
+        techs=[]
+        base=f"https://{self.target}"
+        if tool_ok("whatweb"):
+            ok,out=run_cmd(["whatweb","--no-errors","-a","3",base],60)
+            if ok:
+                for l in lns(out): techs.append(l); self._add("LOW","technology",l)
+        else:
+            headers,body,code=curl_get(base)
+            combined=(headers+body).lower()
+            tech_sigs={
+                "WordPress":r"wp-content|wp-includes|wordpress",
+                "Drupal":r"drupal|sites/default",
+                "Joomla":r"joomla|/components/com_",
+                "Laravel":r"laravel_session|laravel",
+                "Django":r"csrfmiddlewaretoken|django",
+                "React":r"react\.js|__react",
+                "Angular":r"ng-version|angular",
+                "Vue.js":r"vue\.js|__vue",
+                "jQuery":r"jquery",
+                "Bootstrap":r"bootstrap",
+                "PHP":r"php|\.php",
+                "ASP.NET":r"asp\.net|__viewstate|aspx",
+                "Node.js":r"node\.js|express",
+                "Ruby on Rails":r"rails|ruby",
+                "Nginx":r"server: nginx",
+                "Apache":r"server: apache",
+                "IIS":r"server: microsoft-iis",
+                "Tomcat":r"apache tomcat|coyote",
+                "Cloudflare":r"cf-ray|cloudflare",
+                "AWS":r"x-amz|amazonaws|cloudfront",
+            }
+            for name,pat in tech_sigs.items():
+                if re.search(pat,combined,re.I):
+                    techs.append(name); self._add("LOW","technology",name)
+        self.results["tech"]=techs
+
+    # ── 6. WAF fingerprinting ────────────────────────────────────
+    def run_waf(self,prog):
+        prog.log(f"  [bold {C2}]waf-detect[/] → fingerprinting firewall/WAF ...")
+        waf_results=[]
+        base=f"https://{self.target}"
+
+        if tool_ok("wafw00f"):
+            prog.log(f"  [bold {C2}]wafw00f[/] → WAF identification ...")
+            ok,out=run_cmd(["wafw00f",base,"-a"],30)
+            if ok:
+                for l in lns(out):
+                    if re.search(r"is behind|detected|firewall|WAF",l,re.I):
+                        waf_results.append(("wafw00f",l.strip()))
+
+        # Passive header-based fingerprint
+        headers,body,code=curl_get(base)
+        # Also probe with a basic SQLi-like request to trigger WAF
+        headers2,body2,code2=curl_get(f"{base}/?id=1'--",timeout=8)
+        all_headers=(headers+headers2).lower()
+        all_body=(body+body2).lower()
+        # Extract cookies
+        cookies=" ".join(re.findall(r"set-cookie:\s*([^\r\n;]+)",all_headers,re.I))
+
+        detected=fingerprint_waf(all_headers,all_body,cookies)
+        for waf_name,conf,score in detected:
+            entry={"name":waf_name,"confidence":conf,"score":score,
+                   "weaknesses":WAF_SIGNATURES[waf_name]["weaknesses"]}
+            waf_results.append(("passive",f"{waf_name} [confidence:{conf}]"))
+            self.results["waf"].append(entry)
+            sev="MEDIUM" if conf in ("HIGH","MEDIUM") else "LOW"
+            self._add(sev,"waf-detected",f"{waf_name} (confidence: {conf})")
+
+        if not waf_results and not self.results["waf"]:
+            self.results["waf"].append({"name":"None/Unknown","confidence":"LOW",
+                                        "score":0,"weaknesses":["No WAF fingerprint matched — may be unprotected or using custom rules"]})
+            self._add("MEDIUM","waf-status","No known WAF detected — target may be unprotected")
+
+    # ── 7. URL harvesting ────────────────────────────────────────
+    def run_urls(self,prog):
+        urls=set()
         if tool_ok("gau"):
             prog.log(f"  [bold {C2}]gau[/] → harvesting from archives ...")
-            ok, out = run_cmd(["gau","--threads","10",self.target], 180)
+            ok,out=run_cmd(["gau","--threads","10",self.target],180)
             if ok:
                 for u in lns(out): urls.add(u)
         if tool_ok("waybackurls"):
             prog.log(f"  [bold {C2}]waybackurls[/] → Wayback Machine ...")
-            ok, out = run_cmd(["waybackurls",self.target], 120)
+            ok,out=run_cmd(["waybackurls",self.target],120)
             if ok:
                 for u in lns(out): urls.add(u)
-        # archived URLs have no live status — name-only classification
         for u in list(urls)[:500]:
-            self._add(classify_name(u), "url", u)
-        self.results["urls"] = sorted(urls)
+            self._add(classify_name(u),"url",u)
+        self.results["urls"]=sorted(urls)
+        # Extract emails from harvested URLs
+        for u in self.results["urls"]:
+            for m in re.finditer(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",u):
+                if m.group(0) not in self.results["emails"]:
+                    self.results["emails"].append(m.group(0))
+                    self._add("LOW","email",m.group(0))
 
-    # ── 4. Ports ─────────────────────────────────────────────────
-    def run_ports(self, prog):
+    # ── 8. Port scanning ─────────────────────────────────────────
+    def run_ports(self,prog):
         if tool_ok("nmap"):
-            prog.log(f"  [bold {C2}]nmap[/] → scanning common ports ...")
-            ports = "21,22,23,25,53,80,110,143,443,445,3306,3389,5432,6379,8080,8443,8888,27017"
-            ok, out = run_cmd(["nmap","-sCV","-Pn","-T4","--open","-p",ports,self.target], 300)
+            prog.log(f"  [bold {C2}]nmap[/] → scanning ports + service banners ...")
+            ports="21,22,23,25,53,80,110,143,389,443,445,465,587,993,995,1433,1521,3306,3389,5432,5900,6379,8080,8443,8888,9200,27017"
+            ok,out=run_cmd(["nmap","-sCV","-Pn","-T4","--open",
+                            "--script","banner,http-title,ssl-cert,vulners",
+                            "-p",ports,self.target],300)
             if ok:
                 for l in lns(out):
-                    if re.search(r"\d+/(tcp|udp)\s+open", l):
+                    if re.search(r"\d+/(tcp|udp)\s+open",l):
                         self.results["ports"].append(l)
-                        self._add(classify_name(l), "port", l)
+                        self._add(classify_name(l),"port",l)
+                # CVE correlation from nmap vulners output
+                for cve,sev,pat,desc in CVE_SIGNATURES:
+                    if re.search(pat,out,re.I):
+                        entry=f"{cve} — {desc}"
+                        self.results["vulns"].append({"cve":cve,"sev":sev,"desc":desc,"source":"nmap-banner"})
+                        self._add(sev,"cve-banner",entry)
         else:
             prog.log(f"  [bold {ORNG}]fallback[/] → socket port scan ...")
-            import socket
             for port in [21,22,23,25,53,80,110,143,443,445,3306,3389,5432,6379,8080,8443]:
                 try:
-                    s = socket.socket()
-                    s.settimeout(1.5)
-                    s.connect((self.target, port))
-                    s.close()
-                    e = f"{port}/tcp  open"
-                    self.results["ports"].append(e)
-                    self._add(classify_name(e), "port", e)
+                    s=socket.socket(); s.settimeout(1.5); s.connect((self.target,port)); s.close()
+                    e=f"{port}/tcp  open"; self.results["ports"].append(e)
+                    self._add(classify_name(e),"port",e)
                 except: pass
 
-    # ── 5. Sensitive path detection ──────────────────────────────
-    #
-    # FIX: severity = classify_path_with_status(url, code)
-    #   • 200/301/302 on /admin    → HIGH   (truly open)
-    #   • 403         on /admin    → MEDIUM (firewall blocks it — not exposed)
-    #   • 401         on /admin    → MEDIUM (exists but needs creds)
-    #   • 403         on /backup   → MEDIUM
-    #   • 200         on /backup   → HIGH
-    #
-    def run_dirs(self, prog):
+    # ── 9. SSL/TLS analysis ──────────────────────────────────────
+    def run_ssl(self,prog):
+        prog.log(f"  [bold {C2}]ssl-audit[/] → analysing SSL/TLS configuration ...")
+        ssl_findings=[]
+        raw=""
+        if tool_ok("sslscan"):
+            ok,out=run_cmd(["sslscan","--no-colour",self.target],60)
+            if ok: raw=out
+        elif tool_ok("testssl.sh"):
+            ok,out=run_cmd(["testssl.sh","--quiet","--color","0",self.target],120)
+            if ok: raw=out
+        else:
+            # fallback: openssl
+            ok,out=run_cmd(["openssl","s_client","-connect",f"{self.target}:443",
+                            "-servername",self.target],10)
+            if ok: raw=out
+
+        if raw:
+            for name,sev,pat,desc in SSL_VULNS:
+                if re.search(pat,raw,re.I):
+                    entry={"check":name,"sev":sev,"desc":desc}
+                    ssl_findings.append(entry)
+                    self._add(sev,"ssl-issue",f"{name}: {desc}")
+
+            # Check cert expiry
+            ok,out=run_cmd(["openssl","s_client","-connect",f"{self.target}:443",
+                            "-servername",self.target],10)
+            if ok:
+                cert_ok,cert_out=run_cmd(
+                    ["openssl","x509","-noout","-dates","-subject","-issuer"],10)
+                # pipe approach
+                try:
+                    p1=subprocess.Popen(["openssl","s_client","-connect",f"{self.target}:443",
+                                         "-servername",self.target],
+                                        stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL)
+                    p2=subprocess.Popen(["openssl","x509","-noout","-dates","-subject","-issuer"],
+                                        stdin=p1.stdout,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+                    p1.stdout.close()
+                    cert_info,_=p2.communicate(timeout=12)
+                    cert_str=cert_info.decode("utf-8","ignore")
+                    ssl_findings.append({"check":"Certificate Info","sev":"INFO","desc":cert_str.strip()})
+                    self._add("LOW","ssl-cert-info",cert_str.strip()[:200])
+                except: pass
+
+        self.results["ssl"]=ssl_findings
+
+    # ── 10. Nuclei vulnerability scan ────────────────────────────
+    def run_nuclei(self,prog):
+        if not tool_ok("nuclei"):
+            prog.log(f"  [bold {ORNG}]nuclei[/] not found — skipping template scan")
+            return
+        prog.log(f"  [bold {C2}]nuclei[/] → running vulnerability templates ...")
+        base=f"https://{self.target}"
+        # Run with safe, detection-only templates
+        ok,out=run_cmd(["nuclei","-u",base,"-silent","-severity","critical,high,medium",
+                        "-tags","cve,exposure,misconfig,default-login,takeover",
+                        "-rate-limit","30","-timeout","10"],240)
+        if ok:
+            for l in lns(out):
+                m=re.search(r"\[(critical|high|medium|low|info)\]",l,re.I)
+                sev=(m.group(1).upper() if m else "MEDIUM")
+                sev="HIGH" if sev=="HIGH" else sev
+                entry=l.strip()
+                self.results["vulns"].append({"sev":sev,"desc":entry,"source":"nuclei"})
+                self._add(sev,"nuclei-finding",entry)
+
+    # ── 11. Nikto web scan ───────────────────────────────────────
+    def run_nikto(self,prog):
+        if not tool_ok("nikto"):
+            prog.log(f"  [bold {ORNG}]nikto[/] not found — skipping web scan")
+            return
+        prog.log(f"  [bold {C2}]nikto[/] → web vulnerability scan ...")
+        base=f"https://{self.target}"
+        ok,out=run_cmd(["nikto","-host",base,"-nointeractive","-maxtime","120","-Format","txt"],150)
+        if ok:
+            for l in lns(out):
+                if l.startswith("+"):
+                    entry=l.lstrip("+ ").strip()
+                    sev="HIGH" if re.search(r"critical|remote|rce|sql|inject|traversal",entry,re.I) else "MEDIUM"
+                    self.results["vulns"].append({"sev":sev,"desc":entry,"source":"nikto"})
+                    self._add(sev,"nikto-finding",entry)
+
+    # ── 12. HTTP header security audit ──────────────────────────
+    def run_header_audit(self,prog):
+        prog.log(f"  [bold {C2}]header-audit[/] → checking security headers ...")
+        base=f"https://{self.target}"
+        headers,body,code=curl_get(base)
+        h=headers.lower()
+
+        required={
+            "strict-transport-security": ("Missing HSTS Header","MEDIUM","HSTS not set — MITM downgrade possible"),
+            "x-frame-options":           ("Missing X-Frame-Options","MEDIUM","Clickjacking protection absent"),
+            "x-content-type-options":    ("Missing X-Content-Type-Options","LOW","MIME sniffing not disabled"),
+            "content-security-policy":   ("Missing Content-Security-Policy","MEDIUM","No CSP — XSS risk increased"),
+            "referrer-policy":           ("Missing Referrer-Policy","LOW","Referrer policy not set"),
+            "permissions-policy":        ("Missing Permissions-Policy","LOW","Browser permissions not restricted"),
+        }
+        for hdr,(name,sev,desc) in required.items():
+            if hdr not in h:
+                self.results["vulns"].append({"check":name,"sev":sev,"desc":desc,"source":"header-audit"})
+                self._add(sev,"header-missing",f"{name}: {desc}")
+
+        dangerous={
+            r"server:\s*(\S+)":          ("Server Banner Disclosure","LOW"),
+            r"x-powered-by:\s*(.+)":     ("X-Powered-By Disclosure","MEDIUM"),
+            r"x-aspnet-version:\s*(.+)": ("ASP.NET Version Disclosed","MEDIUM"),
+            r"x-aspnetmvc-version:\s*(.+)":("ASP.NET MVC Version","MEDIUM"),
+        }
+        for pat,(name,sev) in dangerous.items():
+            m=re.search(pat,h)
+            if m:
+                val=m.group(1).strip()[:80]
+                self.results["vulns"].append({"check":name,"sev":sev,"desc":val,"source":"header-audit"})
+                self._add(sev,"info-disclosure",f"{name}: {val}")
+
+        # CVE check from banner
+        combined=(headers+body).lower()
+        for cve,sev,pat,desc in CVE_SIGNATURES:
+            if re.search(pat,combined,re.I):
+                entry=f"{cve} — {desc} (detected in HTTP response)"
+                self.results["vulns"].append({"cve":cve,"sev":sev,"desc":desc,"source":"header-cve"})
+                self._add(sev,"cve-http-banner",entry)
+
+    # ── 13. Sensitive path detection ─────────────────────────────
+    def run_dirs(self,prog):
         prog.log(f"  [bold {C2}]path-probe[/] → checking sensitive paths ...")
-        paths = [
+        paths=[
             "/.env","/.git/HEAD","/.git/config","/robots.txt","/sitemap.xml",
             "/admin","/admin/login","/login","/dashboard","/panel",
             "/wp-admin","/wp-login.php","/phpmyadmin","/cpanel",
             "/api","/api/v1","/api/v2","/graphql","/swagger",
-            "/swagger-ui.html","/actuator","/actuator/health",
-            "/backup","/backup.zip","/backup.tar.gz",
-            "/config.php","/config.yml","/config.json",
-            "/.htaccess","/server-status","/server-info",
+            "/swagger-ui.html","/actuator","/actuator/health","/actuator/env",
+            "/backup","/backup.zip","/backup.tar.gz","/db.sql","/dump.sql",
+            "/config.php","/config.yml","/config.json","/.env.local","/.env.prod",
+            "/.htaccess","/server-status","/server-info","/phpinfo.php",
             "/webmail","/mail","/console","/debug","/test","/trace",
-            "/v1/api","/v2/api","/rest/api","/_profiler",
-            "/.ssh/id_rsa","/etc/passwd","/proc/self/environ",
+            "/v1/api","/v2/api","/rest/api","/_profiler","/telescope","/horizon",
+            "/.well-known/security.txt","/.DS_Store","/web.config","/crossdomain.xml",
+            "/clientaccesspolicy.xml","/elmah.axd","/trace.axd",
+            "/jenkins","/jira","/gitlab","/kibana","/grafana","/prometheus",
         ]
-        base_urls = []
+        if tool_ok("ffuf"):
+            prog.log(f"  [bold {C2}]ffuf[/] → directory fuzzing ...")
+            base_url=f"https://{self.target}/FUZZ"
+            wl="/usr/share/wordlists/dirb/common.txt"
+            if not os.path.exists(wl): wl="/usr/share/seclists/Discovery/Web-Content/common.txt"
+            if os.path.exists(wl):
+                ok,out=run_cmd(["ffuf","-u",base_url,"-w",wl,"-mc","200,301,302,401,403",
+                                 "-t","20","-timeout","5","-silent"],180)
+                if ok:
+                    for l in lns(out):
+                        m=re.search(r"(\S+)\s+\[Status: (\d+)",l)
+                        if m:
+                            path_found=m.group(1); code=m.group(2)
+                            url=f"https://{self.target}/{path_found}"
+                            sev=classify_path_with_status(url,code)
+                            entry=f"{url}  [{code}  {status_tag(code)}]"
+                            self.results["dirs"].append((entry,sev,code))
+                            self._add(sev,"ffuf-path",entry)
+
+        base_urls=[]
         for h in self.results["live_hosts"][:5]:
-            m = re.match(r"(https?://[^\s/]+)", h)
-            if m: base_urls.append(m.group(1))
+            mm=re.match(r"(https?://[^\s/]+)",h)
+            if mm: base_urls.append(mm.group(1))
         if not base_urls:
-            base_urls = [f"https://{self.target}", f"http://{self.target}"]
+            base_urls=[f"https://{self.target}",f"http://{self.target}"]
 
         for base in base_urls[:3]:
             for path in paths:
-                url = base.rstrip("/") + path
-                ok, code = run_cmd(
-                    ["curl","-s","-o","/dev/null","-w","%{http_code}",
-                     "--max-time","5","--connect-timeout","3","-L",url], 10)
-                code = code.strip()
-                if not ok or code not in ("200","301","302","401","403"):
-                    continue
+                url=base.rstrip("/")+path
+                ok,code=run_cmd(["curl","-s","-o","/dev/null","-w","%{http_code}",
+                                  "--max-time","5","--connect-timeout","3","-L",
+                                  "--insecure",url],10)
+                code=code.strip()
+                if not ok or code not in ("200","301","302","401","403"): continue
+                sev=classify_path_with_status(url,code)
+                entry=f"{url}  [{code}  {status_tag(code)}]"
+                self.results["dirs"].append((entry,sev,code))
+                self._add(sev,"sensitive_path",entry)
 
-                # ─── STATUS-AWARE CLASSIFICATION ──────────────────────
-                # classify_path_with_status() ensures:
-                #   403 → always MEDIUM (firewall present, path not exposed)
-                #   401 → always MEDIUM (requires credentials)
-                #   200/301/302 → HIGH/MEDIUM/LOW based on path name
-                # ──────────────────────────────────────────────────────
-                sev   = classify_path_with_status(url, code)
-                label = status_tag(code)
-                entry = f"{url}  [{code}  {label}]"
-
-                # store as tuple (entry_string, severity, code) for grouped display
-                self.results["dirs"].append((entry, sev, code))
-                self._add(sev, "sensitive_path", entry)
-
-    # ── API endpoint extractor ───────────────────────────────────
+    # ── 14. API endpoint extractor ───────────────────────────────
     def extract_api_endpoints(self):
         for u in self.results["urls"]:
-            if re.search(r"api|graphql|rest|v\d/|\.json|\.xml", u, re.I):
-                sev = "HIGH" if classify_name(u) == "HIGH" else "MEDIUM"
-                self._add(sev, "api_endpoint", u)
+            if re.search(r"api|graphql|rest|v\d/|\.json|\.xml",u,re.I):
+                sev="HIGH" if classify_name(u)=="HIGH" else "MEDIUM"
+                self._add(sev,"api_endpoint",u)
 
-    # ── Master runner ────────────────────────────────────────────
+    # ── MASTER RUNNER ────────────────────────────────────────────
     def run_all(self):
-        steps = [
-            ("Subdomain Enumeration",    self.run_subdomains, C2,   "◈"),
-            ("Live Host Detection",      self.run_live_hosts, GREEN,"◈"),
-            ("URL Harvesting",           self.run_urls,       PURP, "◈"),
-            ("Port Scanning",            self.run_ports,      ORNG, "◈"),
-            ("Sensitive Path Detection", self.run_dirs,       RED,  "◈"),
+        steps=[
+            ("Subdomain Enumeration",       self.run_subdomains,    C2,   "◈"),
+            ("DNS Records & Zone Transfer",  self.run_dns,           LBLUE,"◈"),
+            ("ASN / IP Information",         self.run_asn,           GREY, "◈"),
+            ("Live Host Detection",          self.run_live_hosts,    GREEN,"◈"),
+            ("Technology Fingerprinting",    self.run_tech,          PURP, "◈"),
+            ("WAF / Firewall Detection",     self.run_waf,           GOLD, "◈"),
+            ("URL Harvesting",               self.run_urls,          C3,   "◈"),
+            ("Port & Service Scanning",      self.run_ports,         ORNG, "◈"),
+            ("SSL/TLS Audit",                self.run_ssl,           TEAL, "◈"),
+            ("HTTP Security Header Audit",   self.run_header_audit,  PINK, "◈"),
+            ("Nuclei Vulnerability Scan",    self.run_nuclei,        RED,  "◈"),
+            ("Nikto Web Scan",               self.run_nikto,         RED,  "◈"),
+            ("Sensitive Path Detection",     self.run_dirs,          RED,  "◈"),
         ]
         with Progress(
-            SpinnerColumn(spinner_name="arc", style=f"bold {C1}"),
+            SpinnerColumn(spinner_name="arc",style=f"bold {C1}"),
             TextColumn(f"[bold {WHITE}]{{task.description}}"),
-            BarColumn(bar_width=30, style=C1, complete_style=GREEN, finished_style=GREEN),
+            BarColumn(bar_width=28,style=C1,complete_style=GREEN,finished_style=GREEN),
             TextColumn(f"[bold {C1}]{{task.percentage:>3.0f}}%"),
             TimeElapsedColumn(),
-            console=console, transient=False,
+            console=console,transient=False,
         ) as prog:
-            overall = prog.add_task(f"[bold {GOLD}]  ◈  Total Progress[/]", total=len(steps))
-            for name, fn, col, icon in steps:
-                task = prog.add_task(f"[bold {col}]{icon}[/]  {name}", total=None)
+            overall=prog.add_task(f"[bold {GOLD}]  ◈  Total Progress[/]",total=len(steps))
+            for name,fn,col,icon in steps:
+                task=prog.add_task(f"[bold {col}]{icon}[/]  {name}",total=None)
                 fn(prog)
-                prog.update(task, completed=1, total=1,
-                            description=f"[bold {GREEN}]✔[/]  {name}")
-                prog.advance(overall)
-                time.sleep(0.12)
+                prog.update(task,completed=1,total=1,description=f"[bold {GREEN}]✔[/]  {name}")
+                prog.advance(overall); time.sleep(0.10)
         self.extract_api_endpoints()
 
 # ══════════════════════════════════════════════════════════════════
@@ -668,169 +1056,206 @@ class KairoxRecon:
 # ══════════════════════════════════════════════════════════════════
 
 def render_results(recon):
-    elapsed = (datetime.now() - recon.start_ts).total_seconds()
+    elapsed=(datetime.now()-recon.start_ts).total_seconds()
     finish_animation()
 
     # ── Summary ──
-    section_header("MISSION SUMMARY", GOLD)
-    meta = Table(box=box.SIMPLE_HEAD, show_header=False,
-                 padding=(0,3), border_style=TEAL, expand=False)
-    meta.add_column("K", style=f"bold {TEAL}",  no_wrap=True, min_width=22)
-    meta.add_column("V", style=f"bold {WHITE}")
-    for k, v in [
-        ("  Target",          f"[bold {C1}]{recon.target}[/]"),
-        ("  Timestamp",       datetime.now().strftime("%Y-%m-%d  %H:%M:%S")),
-        ("  Scan Duration",   f"[bold {GOLD}]{elapsed:.1f}s[/]"),
-        ("  Subdomains",      f"[bold {GREEN}]{len(recon.results['subdomains'])}[/]"),
-        ("  Live Hosts",      f"[bold {GREEN}]{len(recon.results['live_hosts'])}[/]"),
-        ("  URLs Harvested",  f"[bold {PURP}]{len(recon.results['urls'])}[/]"),
-        ("  Open Ports",      f"[bold {ORNG}]{len(recon.results['ports'])}[/]"),
-        ("  Sensitive Paths", f"[bold {RED}]{len(recon.results['dirs'])}[/]"),
-        ("  ─────────────────",""),
-        ("  🔴 HIGH  Findings",  f"[bold {RED}]{len(recon.findings['HIGH'])}[/]   [dim {GREY}]200/301/302 on sensitive paths[/]"),
-        ("  🟡 MEDIUM Findings", f"[bold {ORNG}]{len(recon.findings['MEDIUM'])}[/]   [dim {GREY}]403/401 (blocked/auth) + interesting services[/]"),
-        ("  🟢 LOW   Findings",  f"[bold {GREEN}]{len(recon.findings['LOW'])}[/]   [dim {GREY}]general attack surface[/]"),
+    section_header("MISSION SUMMARY",GOLD)
+    meta=Table(box=box.SIMPLE_HEAD,show_header=False,padding=(0,3),border_style=TEAL,expand=False)
+    meta.add_column("K",style=f"bold {TEAL}",no_wrap=True,min_width=24)
+    meta.add_column("V",style=f"bold {WHITE}")
+    waf_name=recon.results["waf"][0]["name"] if recon.results["waf"] else "Unknown"
+    for k,v in [
+        ("  Target",            f"[bold {C1}]{recon.target}[/]"),
+        ("  Timestamp",         datetime.now().strftime("%Y-%m-%d  %H:%M:%S")),
+        ("  Scan Duration",     f"[bold {GOLD}]{elapsed:.1f}s[/]"),
+        ("  WAF / Firewall",    f"[bold {GOLD}]{waf_name}[/]"),
+        ("  Subdomains",        f"[bold {GREEN}]{len(recon.results['subdomains'])}[/]"),
+        ("  Live Hosts",        f"[bold {GREEN}]{len(recon.results['live_hosts'])}[/]"),
+        ("  URLs Harvested",    f"[bold {PURP}]{len(recon.results['urls'])}[/]"),
+        ("  Open Ports",        f"[bold {ORNG}]{len(recon.results['ports'])}[/]"),
+        ("  Sensitive Paths",   f"[bold {RED}]{len(recon.results['dirs'])}[/]"),
+        ("  Technologies",      f"[bold {LBLUE}]{len(recon.results['tech'])}[/]"),
+        ("  Vulns Found",       f"[bold {RED}]{len(recon.results['vulns'])}[/]"),
+        ("  ─────────────────", ""),
+        ("  🔴 CRITICAL",       f"[bold color(201)]{len(recon.findings['CRITICAL'])}[/]"),
+        ("  🔴 HIGH",           f"[bold {RED}]{len(recon.findings['HIGH'])}[/]   [dim]confirmed accessible / CVEs[/]"),
+        ("  🟡 MEDIUM",         f"[bold {ORNG}]{len(recon.findings['MEDIUM'])}[/]   [dim]403/401 blocked · misconfigs[/]"),
+        ("  🟢 LOW",            f"[bold {GREEN}]{len(recon.findings['LOW'])}[/]   [dim]info disclosure · headers[/]"),
     ]:
-        meta.add_row(k, v)
-    console.print(Panel(meta, title=f"[bold {GOLD}]  ◈  SCAN SUMMARY  ◈  [/]",
-                        border_style=GOLD, box=box.DOUBLE_EDGE, expand=False))
+        meta.add_row(k,v)
+    console.print(Panel(meta,title=f"[bold {GOLD}]  ◈  SCAN SUMMARY  ◈  [/]",
+                        border_style=GOLD,box=box.DOUBLE_EDGE,expand=False))
 
-    # ── Severity legend ──
+    # ── WAF / Firewall Report ──
+    if recon.results["waf"]:
+        section_header("WAF / FIREWALL DETECTION",GOLD)
+        for waf in recon.results["waf"]:
+            conf_col=RED if waf["confidence"]=="HIGH" else ORNG if waf["confidence"]=="MEDIUM" else GREEN
+            waf_title=Text()
+            waf_title.append(f"  ◈  {waf['name']}  ",style=f"bold {GOLD}")
+            waf_title.append(f"[Confidence: {waf['confidence']}]",style=f"bold {conf_col}")
+            console.print(waf_title)
+            console.print()
+            if waf["weaknesses"]:
+                console.print(f"  [bold {RED}]Known Weaknesses & Bypass Notes:[/]")
+                for w in waf["weaknesses"]:
+                    t=Text()
+                    t.append("    ◆  ",style=f"bold {ORNG}")
+                    t.append(w,style=f"{ORNG}")
+                    console.print(t)
+            console.print()
+
+    # ── Vulnerability report ──
+    section_header("VULNERABILITY FINDINGS",RED)
+    leg=Text()
+    leg.append("  SEVERITY  ",style=f"bold {WHITE}")
+    leg.append("  ⚫ CRITICAL",style=f"bold color(201)")
+    leg.append(" = RCE/Auth-Bypass CVEs  ",style=f"dim {WHITE}")
+    leg.append("  🔴 HIGH",style=f"bold {RED}")
+    leg.append(" = Accessible sensitive paths + high-impact vulns  ",style=f"dim {WHITE}")
+    leg.append("  🟡 MEDIUM",style=f"bold {ORNG}")
+    leg.append(" = 403/401 paths + misconfigs  ",style=f"dim {WHITE}")
+    leg.append("  🟢 LOW",style=f"bold {GREEN}")
+    leg.append(" = Info disclosure  ",style=f"dim {WHITE}")
+    console.print(Panel(leg,border_style=TEAL,box=box.SIMPLE,expand=False,padding=(0,1)))
     console.print()
-    leg = Text()
-    leg.append("  SEVERITY GUIDE  ", style=f"bold {WHITE}")
-    leg.append("  🔴 HIGH",    style=f"bold {RED}")
-    leg.append(" = HTTP 200/301/302 on sensitive path (truly accessible)  ",style=f"dim {WHITE}")
-    leg.append("  🟡 MEDIUM",  style=f"bold {ORNG}")
-    leg.append(" = HTTP 403 (firewall) or 401 (auth required) — NOT freely accessible  ",style=f"dim {WHITE}")
-    leg.append("  🟢 LOW",     style=f"bold {GREEN}")
-    leg.append(" = general surface  ", style=f"dim {WHITE}")
-    console.print(Panel(leg, border_style=TEAL, box=box.SIMPLE, expand=False, padding=(0,1)))
 
-    # ── Risk classification tables ──
-    section_header("RISK CLASSIFICATION", RED)
-    for sev, col, title_str in [
-        ("HIGH",   RED,  "🔴 HIGH RISK   — Confirmed Accessible (HTTP 200/301/302)"),
-        ("MEDIUM", ORNG, "🟡 MEDIUM RISK — Firewall/Auth Protected (HTTP 403/401) or Interesting"),
-        ("LOW",    GREEN,"🟢 LOW RISK    — General Attack Surface"),
+    for sev,col,icon,title_str in [
+        ("CRITICAL","color(201)","⚫","CRITICAL — Remote Code Execution / Auth Bypass CVEs"),
+        ("HIGH",     RED,        "🔴","HIGH — Confirmed Exposed / High-Impact"),
+        ("MEDIUM",   ORNG,       "🟡","MEDIUM — Blocked/Auth Protected / Misconfigurations"),
+        ("LOW",      GREEN,      "🟢","LOW — Information Disclosure"),
     ]:
-        items = recon.findings[sev]
+        items=recon.findings[sev]
         if not items: continue
-        tbl = Table(box=box.SIMPLE, show_header=True,
-                    header_style=f"bold {col}", border_style=f"dim {col}",
-                    padding=(0,2), expand=False)
-        tbl.add_column("TYPE",    style=f"dim {col}",  no_wrap=True, min_width=20)
-        tbl.add_column("FINDING", style=f"bold {col}")
-        for ftype, value in items[:60]:
-            tbl.add_row(f"  {ftype.upper().replace('_',' ')}", escape(value))
-        extra = len(items) - 60
+        tbl=Table(box=box.SIMPLE,show_header=True,header_style=f"bold {col}",
+                  border_style=f"dim {col}",padding=(0,2),expand=False)
+        tbl.add_column("TYPE",   style=f"dim {col}",no_wrap=True,min_width=22)
+        tbl.add_column("FINDING",style=f"bold {col}")
+        for ftype,value in items[:60]:
+            tbl.add_row(f"  {ftype.upper().replace('_',' ')}",escape(str(value)))
+        extra=len(items)-60
         console.print(Panel(tbl,
-            title=f"[bold {col}]  {title_str}  ──  {len(items)} findings  [/]",
-            border_style=col, box=box.DOUBLE_EDGE, expand=False))
-        if extra > 0:
-            console.print(f"  [dim {col}]  … and {extra} more {sev} findings[/]\n")
+            title=f"[bold {col}]  {icon}  {title_str}  ──  {len(items)} findings  [/]",
+            border_style=col,box=box.DOUBLE_EDGE,expand=False))
+        if extra>0: console.print(f"  [dim {col}]  … and {extra} more[/]\n")
 
     # ── Subdomains ──
     if recon.results["subdomains"]:
-        section_header("DISCOVERED SUBDOMAINS", C1)
-        tbl = Table(box=box.SIMPLE_HEAD, show_header=True,
-                    header_style=f"bold {C1}", border_style=TEAL,
-                    padding=(0,2), expand=False)
-        tbl.add_column("  #",       style=f"dim {GREY}", justify="right", no_wrap=True, min_width=4)
-        tbl.add_column("SUBDOMAIN", style=f"bold {C2}")
-        tbl.add_column("SEVERITY",  style=f"bold {WHITE}", no_wrap=True, min_width=10)
-        for i, s in enumerate(recon.results["subdomains"][:80], 1):
-            sev = classify_name(s)
-            tbl.add_row(str(i), s, f"[bold {sev_col(sev)}]{sev}[/]")
+        section_header("DISCOVERED SUBDOMAINS",C1)
+        tbl=Table(box=box.SIMPLE_HEAD,show_header=True,header_style=f"bold {C1}",
+                  border_style=TEAL,padding=(0,2),expand=False)
+        tbl.add_column("  #",style=f"dim {GREY}",justify="right",no_wrap=True,min_width=4)
+        tbl.add_column("SUBDOMAIN",style=f"bold {C2}")
+        tbl.add_column("SEVERITY",style=f"bold {WHITE}",no_wrap=True,min_width=10)
+        for i,s in enumerate(recon.results["subdomains"][:80],1):
+            sev=classify_name(s)
+            tbl.add_row(str(i),s,f"[bold {sev_col(sev)}]{sev}[/]")
         console.print(tbl)
+
+    # ── DNS records ──
+    if recon.results["dns"]:
+        section_header("DNS RECORDS",LBLUE)
+        for r in recon.results["dns"][:30]:
+            t=Text(); t.append("  ◈  ",style=f"bold {LBLUE}"); t.append(r,style=f"bold {C2}")
+            console.print(t)
+
+    # ── ASN / IP ──
+    if recon.results["asn"]:
+        section_header("ASN / IP INFORMATION",GREY)
+        for r in recon.results["asn"]:
+            t=Text(); t.append("  ◈  ",style=f"bold {GREY}"); t.append(r,style=WHITE)
+            console.print(t)
+
+    # ── Technologies ──
+    if recon.results["tech"]:
+        section_header("TECHNOLOGY FINGERPRINT",PURP)
+        for r in recon.results["tech"][:20]:
+            t=Text(); t.append("  ◈  ",style=f"bold {PURP}"); t.append(r,style=f"bold {C2}")
+            console.print(t)
 
     # ── Live hosts ──
     if recon.results["live_hosts"]:
-        section_header("LIVE HOSTS", GREEN)
+        section_header("LIVE HOSTS",GREEN)
         for h in recon.results["live_hosts"][:40]:
-            t = Text()
-            t.append("  ▶  ", style=f"bold {GREEN}")
-            t.append(h, style=f"bold {C1}")
+            t=Text(); t.append("  ▶  ",style=f"bold {GREEN}"); t.append(h,style=f"bold {C1}")
             console.print(t)
 
     # ── Ports ──
     if recon.results["ports"]:
-        section_header("OPEN PORTS & SERVICES", ORNG)
+        section_header("OPEN PORTS & SERVICES",ORNG)
         for p in recon.results["ports"]:
-            col = sev_col(classify_name(p))
-            t = Text()
-            t.append("  ●  ", style=f"bold {col}")
-            t.append(p, style=f"bold {ORNG}")
+            col=sev_col(classify_name(p))
+            t=Text(); t.append("  ●  ",style=f"bold {col}"); t.append(p,style=f"bold {ORNG}")
             console.print(t)
 
-    # ── Sensitive paths — grouped by severity ──
+    # ── SSL ──
+    if recon.results["ssl"]:
+        section_header("SSL / TLS AUDIT",TEAL)
+        for s in recon.results["ssl"]:
+            col=sev_col(s.get("sev","LOW"))
+            t=Text()
+            t.append(f"  [{s.get('sev','?'):8s}]  ",style=f"bold {col}")
+            t.append(s.get("check",""),style=f"bold {col}")
+            t.append(f"  —  {s.get('desc','')[:100]}",style=f"dim {WHITE}")
+            console.print(t)
+
+    # ── Sensitive paths ──
     if recon.results["dirs"]:
-        section_header("SENSITIVE PATHS DETECTED", RED)
+        section_header("SENSITIVE PATHS DETECTED",RED)
+        high_p=[(e,c) for e,sev,c in recon.results["dirs"] if sev=="HIGH"]
+        med_p =[(e,c) for e,sev,c in recon.results["dirs"] if sev=="MEDIUM"]
 
-        high_paths = [(e,c) for e,sev,c in recon.results["dirs"] if sev=="HIGH"]
-        med_paths  = [(e,c) for e,sev,c in recon.results["dirs"] if sev=="MEDIUM"]
-        low_paths  = [(e,c) for e,sev,c in recon.results["dirs"] if sev=="LOW"]
-
-        if high_paths:
-            console.print(f"  [bold {RED}]■[/]  [bold {RED}]CONFIRMED ACCESSIBLE  (HTTP 200/301/302)  —  HIGH RISK[/]")
-            console.print(f"  [dim {GREY}]     These paths responded with 200/redirect — they are genuinely reachable[/]")
+        if high_p:
+            console.print(f"  [bold {RED}]■[/]  [bold {RED}]CONFIRMED ACCESSIBLE (200/301/302) — HIGH RISK[/]")
+            console.print(f"  [dim {GREY}]     These paths returned 200/redirect — genuinely reachable[/]")
             console.print()
-            for entry, code in high_paths:
-                t = Text()
-                t.append("    ⚠  ", style=f"bold {RED}")
-                t.append(entry, style=f"bold {RED}")
+            for entry,code in high_p:
+                t=Text(); t.append("    ⚠  ",style=f"bold {RED}"); t.append(entry,style=f"bold {RED}")
+                console.print(t)
+            console.print()
+        if med_p:
+            console.print(f"  [bold {ORNG}]■[/]  [bold {ORNG}]FIREWALL/AUTH PROTECTED (403/401) — MEDIUM RISK[/]")
+            console.print(f"  [dim {GREY}]     403 = firewall blocking.  401 = auth required.  NOT freely accessible.[/]")
+            console.print()
+            for entry,code in med_p:
+                icon="◆" if code=="403" else "🔑"
+                col=ORNG if code=="403" else PURP
+                t=Text(); t.append(f"    {icon}  ",style=f"bold {col}"); t.append(entry,style=f"bold {col}")
                 console.print(t)
             console.print()
 
-        if med_paths:
-            console.print(f"  [bold {ORNG}]■[/]  [bold {ORNG}]FIREWALL / AUTH PROTECTED  (HTTP 403/401)  —  MEDIUM RISK[/]")
-            console.print(f"  [dim {GREY}]     403 = firewall blocking (path may not even exist).  401 = requires credentials.[/]")
-            console.print(f"  [dim {GREY}]     These are NOT freely accessible.  Note for further investigation only.[/]")
-            console.print()
-            for entry, code in med_paths:
-                col = ORNG if code=="403" else PURP
-                icon= "◆" if code=="403" else "🔑"
-                t = Text()
-                t.append(f"    {icon}  ", style=f"bold {col}")
-                t.append(entry, style=f"bold {col}")
-                console.print(t)
-            console.print()
+    # ── API endpoints ──
+    api_items=[(tp,v) for sev in ("CRITICAL","HIGH","MEDIUM")
+               for tp,v in recon.findings[sev] if tp in ("url","api_endpoint")]
+    if api_items:
+        section_header("API ENDPOINTS & INTERESTING URLs",PURP)
+        for _,u in api_items[:30]:
+            t=Text(); t.append("  ⬡  ",style=f"bold {PURP}"); t.append(u,style=f"bold {C2}")
+            console.print(t)
 
-        if low_paths:
-            console.print(f"  [bold {GREEN}]■[/]  [bold {GREEN}]LOW RISK PATHS[/]")
-            console.print()
-            for entry, code in low_paths:
-                t = Text()
-                t.append("    ○  ", style=f"bold {GREEN}")
-                t.append(entry, style=GREEN)
-                console.print(t)
-            console.print()
-
-    # ── API / interesting URLs ──
-    interesting = [(tp,v) for sev in ("HIGH","MEDIUM")
-                   for tp,v in recon.findings[sev]
-                   if tp in ("url","api_endpoint")]
-    if interesting:
-        section_header("API ENDPOINTS & INTERESTING URLs", PURP)
-        for _, u in interesting[:30]:
-            t = Text()
-            t.append("  ⬡  ", style=f"bold {PURP}")
-            t.append(u, style=f"bold {C2}")
+    # ── Emails ──
+    if recon.results["emails"]:
+        section_header("EMAIL ADDRESSES FOUND",LIME)
+        for e in recon.results["emails"][:20]:
+            t=Text(); t.append("  @  ",style=f"bold {LIME}"); t.append(e,style=f"bold {C2}")
             console.print(t)
 
     # ── Footer ──
     console.print()
-    console.print(Rule(style=f"bold {TEAL}", characters="━"))
-    footer = Text()
-    footer.append("  KAIROX v3  ", style=f"bold {C1}")
-    footer.append("◈", style=f"bold {GOLD}")
-    footer.append("  by Shadly Maliyekkal  ", style=f"bold {PURP}")
-    footer.append("◈", style=f"bold {GOLD}")
-    footer.append("  Authorized use only  ", style=f"dim {GREY}")
+    console.print(Rule(style=f"bold {TEAL}",characters="━"))
+    footer=Text()
+    footer.append("  KAIROX v4  ",style=f"bold {C1}")
+    footer.append("◈",style=f"bold {GOLD}")
+    footer.append("  by Shadly Maliyekkal  ",style=f"bold {PURP}")
+    footer.append("◈",style=f"bold {GOLD}")
+    footer.append("  OSCP-Grade Recon + Vuln Platform  ",style=f"dim {GREY}")
+    footer.append("◈",style=f"bold {GOLD}")
+    footer.append("  Authorized use only  ",style=f"dim {GREY}")
     console.print(Align.center(footer))
-    console.print(Rule(style=f"bold {TEAL}", characters="━"))
+    console.print(Rule(style=f"bold {TEAL}",characters="━"))
     console.print()
-
     save_report(recon)
 
 # ══════════════════════════════════════════════════════════════════
@@ -838,71 +1263,56 @@ def render_results(recon):
 # ══════════════════════════════════════════════════════════════════
 
 def save_report(recon):
-    ts   = recon.start_ts.strftime("%Y%m%d_%H%M%S")
-    name = f"kairox_{recon.target.replace('.','_')}_{ts}.json"
-    dirs_out = [{"path": e, "severity": sev, "status_code": c}
-                for e, sev, c in recon.results["dirs"]]
-    data = {
-        "target":    recon.target,
-        "timestamp": recon.start_ts.isoformat(),
-        "severity_note": "HIGH=HTTP200/301/302 on sensitive path. MEDIUM=HTTP403(firewall) or 401(auth). NOT accessible=403.",
-        "results": {
-            "subdomains": recon.results["subdomains"],
-            "live_hosts": recon.results["live_hosts"],
-            "urls":       recon.results["urls"],
-            "ports":      recon.results["ports"],
-            "dirs":       dirs_out,
+    ts=recon.start_ts.strftime("%Y%m%d_%H%M%S")
+    name=f"kairox_{recon.target.replace('.','_')}_{ts}.json"
+    dirs_out=[{"path":e,"severity":sev,"status_code":c} for e,sev,c in recon.results["dirs"]]
+    data={
+        "tool":"KAIROX v4","target":recon.target,"timestamp":recon.start_ts.isoformat(),
+        "severity_note":"HIGH=HTTP200/301/302 on sensitive path. MEDIUM=403/401(firewall/auth).",
+        "results":{
+            "subdomains":recon.results["subdomains"],"live_hosts":recon.results["live_hosts"],
+            "urls":recon.results["urls"],"ports":recon.results["ports"],"dirs":dirs_out,
+            "waf":recon.results["waf"],"vulns":recon.results["vulns"],
+            "ssl":recon.results["ssl"],"dns":recon.results["dns"],
+            "tech":recon.results["tech"],"emails":recon.results["emails"],
+            "asn":recon.results["asn"],
         },
-        "findings": {s: list(i) for s, i in recon.findings.items()},
+        "findings":{s:list(i) for s,i in recon.findings.items()},
     }
     try:
-        Path(name).write_text(json.dumps(data, indent=2))
-        t = Text()
-        t.append("  ✔  ", style=f"bold {GREEN}")
-        t.append("Report saved  →  ", style=f"dim {GREY}")
-        t.append(name, style=f"bold {C1}")
-        console.print(t)
-        console.print()
+        Path(name).write_text(json.dumps(data,indent=2))
+        t=Text(); t.append("  ✔  ",style=f"bold {GREEN}")
+        t.append("Report saved  →  ",style=f"dim {GREY}"); t.append(name,style=f"bold {C1}")
+        console.print(t); console.print()
     except Exception as e:
-        console.print(f"  [bold {RED}]⚠[/]  Could not save report: {e}\n")
+        console.print(f"  [bold {RED}]⚠[/]  Could not save: {e}\n")
 
 # ══════════════════════════════════════════════════════════════════
 #   MAIN
 # ══════════════════════════════════════════════════════════════════
 
 def main():
-    animate_banner()
-    boot_sequence()
-    show_disclaimer()
-    require_consent()
-    check_tools()
-
+    animate_banner(); boot_sequence(); show_disclaimer(); require_consent(); check_tools()
     console.print(f"  [bold {GOLD}]◈[/]  [bold {WHITE}]Enter target domain[/]  [dim {GREY}](e.g. example.com)[/]")
-    target = Prompt.ask(f"  [bold {C1}]  ❯[/]")
-    target = target.strip().lower().removeprefix("http://").removeprefix("https://").rstrip("/")
-
+    target=Prompt.ask(f"  [bold {C1}]  ❯[/]")
+    target=target.strip().lower().removeprefix("http://").removeprefix("https://").rstrip("/")
     if not target or "." not in target:
-        console.print(f"\n  [bold {RED}]✘[/]  Invalid domain. Exiting.\n")
-        sys.exit(1)
-
-    console.print()
-    scanning_init_anim(target)
-
+        console.print(f"\n  [bold {RED}]✘[/]  Invalid domain. Exiting.\n"); sys.exit(1)
+    console.print(); scanning_init_anim(target)
     console.print(Panel(
         f"  [bold {TEAL}]Target  [/]  [bold {C1}]{target}[/]\n"
-        f"  [bold {TEAL}]Mode    [/]  Passive + Active Reconnaissance\n"
-        f"  [bold {TEAL}]Engine  [/]  [bold {C1}]KAIROX v3[/]  ·  by Shadly Maliyekkal",
+        f"  [bold {TEAL}]Mode    [/]  OSCP-Grade Recon + Vulnerability Detection\n"
+        f"  [bold {TEAL}]Modules [/]  Subdomain · DNS · ASN · Ports · SSL · WAF · Vuln · Headers\n"
+        f"  [bold {TEAL}]Engine  [/]  [bold {C1}]KAIROX v4[/]  ·  by Shadly Maliyekkal",
         title=f"[bold {GOLD}]  ◈  SCAN INITIALIZING  ◈  [/]",
-        border_style=GOLD, box=box.DOUBLE_EDGE, expand=False))
+        border_style=GOLD,box=box.DOUBLE_EDGE,expand=False))
     console.print()
-
-    recon = KairoxRecon(target)
+    recon=KairoxRecon(target)
     recon.run_all()
     render_results(recon)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     try:
         main()
     except KeyboardInterrupt:
-        console.print(f"\n\n  [bold {ORNG}]⚡[/]  Interrupted. Exiting cleanly.\n")
-        sys.exit(0)
+        console.print(f"\n\n  [bold {ORNG}]⚡[/]  Interrupted. Exiting cleanly.\n"); sys.exit(0)
