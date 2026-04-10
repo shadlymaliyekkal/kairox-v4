@@ -190,6 +190,12 @@ if command -v apt-get &>/dev/null; then
         apt_install "wafw00f"
     fi
 
+    # FIX: libpcap-dev is required by naabu for SYN/packet capture scanning
+    # Without it, 'go install naabu' silently fails to produce a working binary
+    spinner_start "Installing libpcap-dev (required by naabu)"
+    sudo apt-get install -y -qq libpcap-dev &>/dev/null 2>&1
+    spinner_ok "libpcap-dev installed"
+
     # testssl.sh — NOT in main apt repo, install directly
     if command -v testssl.sh &>/dev/null || [ -f /usr/local/bin/testssl.sh ]; then
         spinner_skip "testssl.sh"
@@ -200,7 +206,7 @@ if command -v apt-get &>/dev/null; then
             spinner_ok "testssl.sh (apt)"
         else
             # Download directly from testssl.sh project
-            # FIX: removed 'local' keyword — not inside a function
+            # FIX: removed 'local' keyword — not valid outside a function
             TSSL_URL="https://raw.githubusercontent.com/drwetter/testssl.sh/3.2/testssl.sh"
             if command -v curl &>/dev/null; then
                 sudo curl -fsSL "$TSSL_URL" -o /usr/local/bin/testssl.sh &>/dev/null 2>&1
@@ -221,6 +227,10 @@ elif command -v dnf &>/dev/null; then
     sudo dnf check-update -q &>/dev/null 2>&1 || true
     spinner_ok "Package index updated"
     for pkg in nmap curl wget whois git openssl unzip; do dnf_install "$pkg"; done
+    # FIX: libpcap-devel required by naabu on dnf/rpm systems
+    spinner_start "Installing libpcap-devel (required by naabu)"
+    sudo dnf install -y -q libpcap-devel &>/dev/null 2>&1
+    spinner_ok "libpcap-devel installed"
     # testssl.sh on dnf systems
     if ! command -v testssl.sh &>/dev/null; then
         spinner_start "Installing testssl.sh (direct download)"
@@ -328,8 +338,9 @@ install_go_tool "subfinder"   "github.com/projectdiscovery/subfinder/v2/cmd/subf
 install_go_tool "httpx"       "github.com/projectdiscovery/httpx/cmd/httpx"             "live host probe + tech"
 install_go_tool "dnsx"        "github.com/projectdiscovery/dnsx/cmd/dnsx"               "fast DNS resolver"
 install_go_tool "nuclei"      "github.com/projectdiscovery/nuclei/v3/cmd/nuclei"        "CVE/vuln templates"
-# FIX: updated naabu to v3 to resolve binary not found issue
-install_go_tool "naabu"       "github.com/projectdiscovery/naabu/v3/cmd/naabu"          "fast port scanner"
+# FIX: naabu stays on v2 (latest is v2.5.0, v3 does not exist)
+# Root cause of missing binary was libpcap-dev not installed — now fixed above
+install_go_tool "naabu"       "github.com/projectdiscovery/naabu/v2/cmd/naabu"          "fast port scanner"
 install_go_tool "katana"      "github.com/projectdiscovery/katana/cmd/katana"           "web crawler"
 install_go_tool "gau"         "github.com/lc/gau/v2/cmd/gau"                            "URL harvesting"
 install_go_tool "waybackurls" "github.com/tomnomnom/waybackurls"                        "Wayback URLs"
