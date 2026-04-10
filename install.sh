@@ -200,7 +200,8 @@ if command -v apt-get &>/dev/null; then
             spinner_ok "testssl.sh (apt)"
         else
             # Download directly from testssl.sh project
-            local TSSL_URL="https://raw.githubusercontent.com/drwetter/testssl.sh/3.2/testssl.sh"
+            # FIX: removed 'local' keyword — not inside a function
+            TSSL_URL="https://raw.githubusercontent.com/drwetter/testssl.sh/3.2/testssl.sh"
             if command -v curl &>/dev/null; then
                 sudo curl -fsSL "$TSSL_URL" -o /usr/local/bin/testssl.sh &>/dev/null 2>&1
             elif command -v wget &>/dev/null; then
@@ -327,7 +328,8 @@ install_go_tool "subfinder"   "github.com/projectdiscovery/subfinder/v2/cmd/subf
 install_go_tool "httpx"       "github.com/projectdiscovery/httpx/cmd/httpx"             "live host probe + tech"
 install_go_tool "dnsx"        "github.com/projectdiscovery/dnsx/cmd/dnsx"               "fast DNS resolver"
 install_go_tool "nuclei"      "github.com/projectdiscovery/nuclei/v3/cmd/nuclei"        "CVE/vuln templates"
-install_go_tool "naabu"       "github.com/projectdiscovery/naabu/v2/cmd/naabu"          "fast port scanner"
+# FIX: updated naabu to v3 to resolve binary not found issue
+install_go_tool "naabu"       "github.com/projectdiscovery/naabu/v3/cmd/naabu"          "fast port scanner"
 install_go_tool "katana"      "github.com/projectdiscovery/katana/cmd/katana"           "web crawler"
 install_go_tool "gau"         "github.com/lc/gau/v2/cmd/gau"                            "URL harvesting"
 install_go_tool "waybackurls" "github.com/tomnomnom/waybackurls"                        "Wayback URLs"
@@ -391,7 +393,7 @@ section "Final Tool Status"
 # ─────────────────────────────────────────────────────────────────
 
 echo -e "  ${CYAN}┌──────────────────────────────────────────────────────────┐${NC}"
-echo -e "  ${CYAN}│            KAIROX v3 — TOOL STATUS SUMMARY               │${NC}"
+echo -e "  ${CYAN}│            KAIROX v4 — TOOL STATUS SUMMARY               │${NC}"
 echo -e "  ${CYAN}└──────────────────────────────────────────────────────────┘${NC}"
 echo ""
 
